@@ -30,6 +30,7 @@ const QS = 1e4; // quantization steps per unit
 export const quant = (v) => Math.round(v * QS) / QS;
 const EPS = 1e-6;
 const SATURATED = 400; // lines in one region beyond which crossings are no longer priced
+const BUSY = 100; // lines in one region beyond which ways out are not split by the lines they cross
 
 /** Distance kept from a box's corners when a line attaches to its side. */
 export const sideInset = (len, gap) => Math.min(len * 0.2, gap * 0.3);
@@ -261,40 +262,42 @@ export class Level {
     const dy = hI ? io.dir[0] : io.dir[1];
     const bl = border.line;
     const a0 = Math.min(io.hi, Math.max(io.lo, bl)); // as close to the border as io allows
-    const a = ctx.pick([io], [io.lo, io.hi], a0);
-    if (a === null) return out;
     const pad = this.clear;
-    let near = io.line + dy * pad; // the turn must lie beyond io's side
-    let far = dy > 0 ? Infinity : -Infinity; // ... and before anything in the way of the first piece
-    const blocks = [];
-    const x0 = Math.min(a, bl), x1 = Math.max(a, bl);
-    // everything that matters lies in the strip both pieces can occupy (swapped frame)
-    const u0 = Math.min(a, x0) - pad, u1 = Math.max(a, x1) + pad;
-    const strip = hI ? [-Infinity, u0, Infinity, u1] : [u0, -Infinity, u1, Infinity];
     const f = this.frame;
-    const ks = this.obstaclesIn(Math.max(strip[0], 0), Math.max(strip[1], 0), Math.min(strip[2], f.w), Math.min(strip[3], f.h));
-    for (const R of ks.filter((k) => k !== io.item).map((k) => rect(this.obstacle(k)))) {
-      if (R.x - pad < a && a < R.x + R.w + pad) {
-        // the first piece runs along x = a: stop before R if R lies ahead
-        if (dy < 0 && R.y + R.h <= io.line + EPS) far = Math.max(far, R.y + R.h + pad);
-        if (dy > 0 && R.y >= io.line - EPS) far = Math.min(far, R.y - pad);
+    // where a0 is claimed, leaving on the one or the other side of that line are different
+    // topologies: one L for each
+    for (const a of ctx.spots([io], [io.lo, io.hi], a0)) {
+      let near = io.line + dy * pad; // the turn must lie beyond io's side
+      let far = dy > 0 ? Infinity : -Infinity; // ... and before anything in the way of the first piece
+      const blocks = [];
+      const x0 = Math.min(a, bl), x1 = Math.max(a, bl);
+      // everything that matters lies in the strip both pieces can occupy (swapped frame)
+      const u0 = Math.min(a, x0) - pad, u1 = Math.max(a, x1) + pad;
+      const strip = hI ? [-Infinity, u0, Infinity, u1] : [u0, -Infinity, u1, Infinity];
+      const ks = this.obstaclesIn(Math.max(strip[0], 0), Math.max(strip[1], 0), Math.min(strip[2], f.w), Math.min(strip[3], f.h));
+      for (const R of ks.filter((k) => k !== io.item).map((k) => rect(this.obstacle(k)))) {
+        if (R.x - pad < a && a < R.x + R.w + pad) {
+          // the first piece runs along x = a: stop before R if R lies ahead
+          if (dy < 0 && R.y + R.h <= io.line + EPS) far = Math.max(far, R.y + R.h + pad);
+          if (dy > 0 && R.y >= io.line - EPS) far = Math.min(far, R.y - pad);
+        }
+        if (R.x - pad < x1 && x0 < R.x + R.w + pad) blocks.push([R.y - pad, R.y + R.h + pad]);
       }
-      if (R.x - pad < x1 && x0 < R.x + R.w + pad) blocks.push([R.y - pad, R.y + R.h + pad]);
+      let lo = Math.max(border.lo, Math.min(near, far)), hi = Math.min(border.hi, Math.max(near, far));
+      if (hi < lo) continue;
+      // remove positions where the second piece would hit something; keep the part nearest io
+      let spans = [[lo, hi]];
+      for (const [b0, b1] of blocks) {
+        spans = spans.flatMap(([u, v]) => (b1 <= u || b0 >= v ? [[u, v]] : [[u, Math.min(v, b0)], [Math.max(u, b1), v]]))
+          .filter(([u, v]) => v - u > -EPS);
+      }
+      if (!spans.length) continue;
+      const span = dy < 0 ? spans[spans.length - 1] : spans[0];
+      const ref = dy < 0 ? span[1] : span[0];
+      out.push({ bends: 1, lo: span[0], hi: span[1], io,
+        cost: io.cost + s * (this.bendCost + Math.abs(ref - io.line) + Math.abs(bl - a)),
+        at: () => a, pts: (c) => [sw([a, io.line]), sw([a, c]), sw([bl, c])] });
     }
-    let lo = Math.max(border.lo, Math.min(near, far)), hi = Math.min(border.hi, Math.max(near, far));
-    if (hi < lo) return out;
-    // remove positions where the second piece would hit something; keep the part nearest io
-    let spans = [[lo, hi]];
-    for (const [b0, b1] of blocks) {
-      spans = spans.flatMap(([u, v]) => (b1 <= u || b0 >= v ? [[u, v]] : [[u, Math.min(v, b0)], [Math.max(u, b1), v]]))
-        .filter(([u, v]) => v - u > -EPS);
-    }
-    if (!spans.length) return out;
-    const span = dy < 0 ? spans[spans.length - 1] : spans[0];
-    const ref = dy < 0 ? span[1] : span[0];
-    out.push({ bends: 1, lo: span[0], hi: span[1], io,
-      cost: io.cost + s * (this.bendCost + Math.abs(ref - io.line) + Math.abs(bl - a)),
-      at: () => a, pts: (c) => [sw([a, io.line]), sw([a, c]), sw([bl, c])] });
     return out;
   }
 
@@ -302,8 +305,9 @@ export class Level {
    * The border positions a path's last piece can move to (see slideTo) while it and the
    * piece before it stay free: the stretch of that piece's line free of obstacles, cut to
    * where a straight run from it to the border is free. [c, c] when it cannot move.
+   * Clearances are those of `free`; `skip` is the item the path starts at.
    */
-  slideRange(pts, border, c) {
+  slideRange(pts, border, c, skip) {
     const n = pts.length;
     if (n < 3) return [c, c];
     const h = horizontal(border); // the last piece runs across the border's axis
@@ -312,10 +316,13 @@ export class Level {
     const m = h ? prev[0] : prev[1]; // where the piece before runs, parallel to the border
     const f = this.frame;
     let lo = border.lo, hi = border.hi;
-    const from = before[k], pad = this.clear;
+    const from = before[k], nr = this.rects.length;
     // the piece before extends along its line until something lies across it
-    const ks = h ? this.obstaclesIn(m - pad, 0, m + pad, f.h) : this.obstaclesIn(0, m - pad, f.w, m + pad);
-    for (const R of ks.map((q) => this.obstacle(q))) {
+    const ks = h ? this.obstaclesIn(m - this.clear, 0, m + this.clear, f.h) : this.obstaclesIn(0, m - this.clear, f.w, m + this.clear);
+    for (const q of ks) {
+      const R = this.obstacle(q);
+      // the path's own box only bounds the piece that leaves it
+      const pad = q >= nr ? this.clear * 0.5 : q === skip ? (n === 3 ? 0 : this.clear) : this.clear;
       const a0 = h ? R.x : R.y, a1 = h ? R.x + R.w : R.y + R.h; // across the piece
       if (a1 + pad <= m || a0 - pad >= m) continue;
       const b0 = (h ? R.y : R.x) - pad, b1 = (h ? R.y + R.h : R.x + R.w) + pad; // along it
@@ -891,7 +898,8 @@ function adjust(pts, P, a, Q, b) {
  * Route connections ("nets") through the nested layout.
  * @param L layout: boxes (with .level, .itemIndex for regions), root, ancestors
  * @param nets [{id, from, to, ...}]
- * @param opts {ripUp}: false skips placing crossing lines again (large maps)
+ * @param opts {thorough}: false (large maps) skips placing crossing lines again and
+ *   offers each region's ways out unpriced by the lines they cross, one per side and shape
  * @returns segments [{container, depth, points (world), members, srcItem, dstItem, terminal}]
  */
 export function routeNets(L, nets, opts = {}) {
@@ -907,6 +915,7 @@ export function routeNets(L, nets, opts = {}) {
   const ordered = [...groups.values()].sort((a, b) => b.members.length - a.members.length ||
     a.from.localeCompare(b.from) || a.to.localeCompare(b.to));
   const ctx = new Claims();
+  const thorough = opts.thorough !== false;
 
   /**
    * Options for leaving towards `chain[j..]` as seen in region C (C = chain[j - 1], or the
@@ -940,26 +949,134 @@ export function routeNets(L, nets, opts = {}) {
       if (!border) continue;
       const ranges = [];
       for (const io of inner) for (const r of lvl.exitRanges(io, border, ctx)) ranges.push(r);
-      // per side: the cheapest straight and the cheapest L way out
+      // per side: straight and L ways out
       for (const bends of [0, 1]) {
-        const r = ranges.filter((x) => x.bends === bends).sort((x, y) => x.cost - y.cost)[0];
-        if (!r) continue;
-        out.push({ side, line: border.line, lo: r.lo, hi: r.hi, dir: OUT[side], cost: r.cost, border: true,
-          level: lvl, keys: bends === 0 ? [...ctx.keys(r.io), ...ctx.keys(border)] : ctx.keys(border),
-          expand: (c) => [...r.io.expand(r.at(c)), { level: lvl, pts: r.pts(c), P: r.io, Q: border }] });
+        for (const r of offered(lvl, border, ranges.filter((x) => x.bends === bends))) {
+          out.push({ side, line: border.line, lo: r.lo, hi: r.hi, dir: OUT[side], cost: r.cost, border: true,
+            level: lvl, keys: bends === 0 ? [...ctx.keys(r.io), ...ctx.keys(border)] : ctx.keys(border),
+            expand: (c) => [...r.io.expand(r.at(c)), { level: lvl, pts: r.pts(c), P: r.io, Q: border }] });
+        }
       }
       if (ranges.length) continue;
       // otherwise the cheapest path of any shape; its last piece can still slide along the
       // border as far as the free space allows, so the outside chooses where it crosses
       const r = lvl.connect(inner, [border], ctx);
       if (!r) continue;
-      const [lo, hi] = lvl.slideRange(r.pts, border, r.cQ);
-      out.push({ side, line: border.line, lo, hi, dir: OUT[side], cost: r.cost, border: true,
-        level: lvl, keys: ctx.keys(border),
-        expand: (c) => [...r.P.expand(r.cP), { level: lvl, pts: slideTo(r.pts, border, c), P: r.P, Q: border }] });
+      const [lo, hi] = lvl.slideRange(r.pts, border, r.cQ, r.P.item);
+      const known = crossings(r.pts, r.placed) * lvl.world.scale * lvl.crossCost; // priced at r.cQ
+      const slide = { lo, hi, cost: r.cost - known, known, pts: (c) => slideTo(r.pts, border, c) };
+      for (const x of offered(lvl, border, [slide])) {
+        out.push({ side, line: border.line, lo: x.lo, hi: x.hi, dir: OUT[side], cost: x.cost,
+          border: true, level: lvl, keys: ctx.keys(border),
+          expand: (c) => [...r.P.expand(r.cP), { level: lvl, pts: slideTo(r.pts, border, c), P: r.P, Q: border }] });
+      }
     }
     return out;
   };
+
+  /**
+   * The ways out to offer among `ranges` ({lo, hi, cost, pts(c), known?}, cost not
+   * counting crossings, `known` the price of those already found where they cannot be
+   * split): where on the border a line crosses decides which placed lines its inside
+   * part crosses, so each range is split into stretches priced with their crossings
+   * (byCrossings). Offered are the cheapest stretch and the cheapest one apart from it
+   * (passing placed lines on their other side, say: a different topology that only the
+   * whole line can judge). Crossings only add cost, so ranges are split cheapest first and
+   * only while they can still be offered.
+   */
+  const offered = (lvl, border, ranges) => {
+    const crossCost = lvl.world.scale * lvl.crossCost;
+    const pool = [];
+    let kept = [];
+    for (const r of ranges.sort((x, y) => x.cost - y.cost)) {
+      if (kept.length === (thorough ? 2 : 1) && r.cost >= kept[kept.length - 1].cost - EPS) break;
+      for (const part of byCrossings(lvl, border, r.lo, r.hi, r.pts)) {
+        const priced = part.n === null ? r.known ?? 0 : part.n * crossCost;
+        pool.push({ ...r, lo: part.lo, hi: part.hi, cost: r.cost + priced });
+      }
+      kept = [];
+      for (const x of pool.sort((p, q) => p.cost - q.cost)) {
+        if (kept.length < (thorough ? 2 : 1) && !kept.some((k) => x.lo <= k.hi + EPS && k.lo <= x.hi + EPS)) kept.push(x);
+      }
+    }
+    return kept;
+  };
+
+  /**
+   * Split the border positions lo..hi of a way out into stretches over which its inside
+   * path pts(c) crosses the same number of placed lines: [{lo, hi, n}]. That number can
+   * only change where c passes a corner or end of a placed piece, so the range is cut
+   * there (keeping sep from the cut). Positions where the last piece would run within sep
+   * of a placed piece parallel to it are left out: no room to spread them apart there.
+   * Each split scans the lines around the way out, so in a busy region (where single
+   * lines can no longer be followed anyway) and on large maps there is one stretch, not
+   * priced (n null).
+   */
+  const byCrossings = (lvl, border, lo, hi, pts) => {
+    if (ctx.count(lvl) === 0) return [{ lo, hi, n: 0 }];
+    if (!thorough || ctx.count(lvl) > BUSY) return [{ lo, hi, n: null }];
+    // the path stays within the box swept between its two extremes: only placed pieces
+    // passing through it (or within sep of it) matter
+    const sep = lvl.sep, swept = [...pts(lo), ...pts(hi)], sw = bbox(swept), segs = [];
+    for (const pc of ctx.near(lvl, swept, sep)) {
+      const o = pc.bbox;
+      if (o.x1 < sw.x0 - sep || o.x0 > sw.x1 + sep || o.y1 < sw.y0 - sep || o.y0 > sw.y1 + sep) continue;
+      for (let i = 1; i < pc.points.length; i++) {
+        const [p, q] = [pc.points[i - 1], pc.points[i]];
+        if (Math.max(p[0], q[0]) < sw.x0 - sep || Math.min(p[0], q[0]) > sw.x1 + sep ||
+          Math.max(p[1], q[1]) < sw.y0 - sep || Math.min(p[1], q[1]) > sw.y1 + sep) continue;
+        segs.push([pc.points, i - 1]);
+      }
+    }
+    if (!segs.length) return [{ lo, hi, n: 0 }];
+    const count = (c) => {
+      const P = pts(c);
+      let n = 0;
+      for (let i = 0; i + 1 < P.length; i++) for (const [Q, j] of segs) n += meet(P, i, Q, j);
+      return n;
+    };
+    const across = (p) => (horizontal(border) ? p[0] : p[1]);
+    const P0 = pts(lo), e0 = across(P0[P0.length - 2]), e1 = across(P0[P0.length - 1]); // the last piece's extent
+    const lanes = [], corners = [];
+    for (const [Q, j] of segs) {
+      const u = alongOf(border, Q[j]), v = alongOf(border, Q[j + 1]);
+      if (Math.abs(u - v) >= EPS) corners.push(u, v);
+      else if (Math.min(Math.max(across(Q[j]), across(Q[j + 1])), Math.max(e0, e1)) -
+        Math.max(Math.min(across(Q[j]), across(Q[j + 1])), Math.min(e0, e1)) > EPS) lanes.push(u);
+    }
+    // the range without the lanes of placed parallel pieces (pieces on one line take a
+    // lane each once spread apart), cut at corners
+    const parts = [];
+    let start = lo;
+    lanes.sort((x, y) => x - y);
+    for (let i = 0; i < lanes.length;) {
+      const z = lanes[i];
+      let m = 0;
+      while (i < lanes.length && lanes[i] - z < EPS) i++, m++;
+      if (z - m * sep >= start - EPS && start <= hi + EPS) parts.push([start, Math.min(hi, z - m * sep)]);
+      start = Math.max(start, z + m * sep);
+    }
+    if (start <= hi + EPS) parts.push([start, hi]);
+    corners.sort((x, y) => x - y);
+    const out = [];
+    for (const [plo, phi] of parts) {
+      if (phi - plo < EPS) { out.push({ lo: plo, hi: phi, n: count(plo) }); continue; }
+      const marks = [plo];
+      for (const v of corners) if (v > plo + EPS && v < phi - EPS && v > marks[marks.length - 1] + EPS) marks.push(v);
+      marks.push(phi);
+      const first = out.length;
+      for (let i = 0; i + 1 < marks.length; i++) {
+        const a = i === 0 ? plo : marks[i] + sep, b = i + 2 === marks.length ? phi : marks[i + 1] - sep;
+        if (b < a - EPS) continue;
+        const n = count((a + b) / 2);
+        const last = out.length > first ? out[out.length - 1] : null;
+        if (last && last.n === n) last.hi = b;
+        else out.push({ lo: a, hi: b, n });
+      }
+    }
+    return out.length ? out : [{ lo, hi, n: count((lo + hi) / 2) }];
+  };
+
 
   /** An option on child region i's border, seen from the parent level (as a side of item i). */
   const toParent = (O, parent, i) => {
@@ -1002,7 +1119,7 @@ export function routeNets(L, nets, opts = {}) {
   // line that crosses others is placed again with all others known, and keeps the new
   // way only if it crosses fewer lines. Then the same for the lines crossing one that
   // moved, while any moves. Costs about one more routing pass, so large maps skip it.
-  let todo = opts.ripUp === false ? [] : ordered.filter((g) => g.pieces);
+  let todo = thorough ? ordered.filter((g) => g.pieces) : [];
   for (let pass = 0; pass < 4 && todo.length; pass++) {
     const moved = [];
     const candidates = todo.map((g) => [g, crossed(g)]).filter(([, n]) => n > 0).sort((a, b) => b[1] - a[1]);
@@ -1146,27 +1263,59 @@ function alongside(pts, placed, sep) {
   return total;
 }
 
-/** Proper crossings between a polyline and placed ones ({points, bbox}). */
+/**
+ * Crossings between a polyline and placed ones ({points, bbox}): proper crossings, and
+ * stretches a line shares with another (collinear until `separate` spreads them) that
+ * cross once spread apart.
+ */
 export function crossings(pts, placed) {
   let n = 0;
   const b = bbox(pts);
   for (const r of placed) {
     const o = r.bbox;
     if (o.x1 < b.x0 || o.x0 > b.x1 || o.y1 < b.y0 || o.y0 > b.y1) continue;
-    for (let i = 1; i < pts.length; i++) {
-      for (let j = 1; j < r.points.length; j++) n += crosses(pts[i - 1], pts[i], r.points[j - 1], r.points[j]);
+    for (let i = 0; i + 1 < pts.length; i++) {
+      for (let j = 0; j + 1 < r.points.length; j++) n += meet(pts, i, r.points, j);
     }
   }
   return n;
 }
 
-function crosses(a, b, c, d) {
-  const h1 = Math.abs(a[1] - b[1]) < EPS, h2 = Math.abs(c[1] - d[1]) < EPS;
-  if (h1 === h2) return 0;
-  const [H0, H1, V0, V1] = h1 ? [a, b, c, d] : [c, d, a, b];
-  const x = V0[0], y = H0[1];
-  return x > Math.min(H0[0], H1[0]) + EPS && x < Math.max(H0[0], H1[0]) - EPS &&
-    y > Math.min(V0[1], V1[1]) + EPS && y < Math.max(V0[1], V1[1]) - EPS ? 1 : 0;
+/**
+ * Do the pieces P[i]-P[i+1] and Q[j]-Q[j+1] of two lines cross: properly, or by sharing
+ * a collinear stretch that the lines leave on opposite sides at its two ends (spread
+ * apart, they then cross once, whichever goes first)? Where a side is undecided (both
+ * turn the same way, or end there), they do not.
+ */
+function meet(P, i, Q, j) {
+  const [a, b, c, d] = [P[i], P[i + 1], Q[j], Q[j + 1]];
+  const h = Math.abs(a[1] - b[1]) < EPS;
+  if (h !== (Math.abs(c[1] - d[1]) < EPS)) {
+    const [H0, H1, V0, V1] = h ? [a, b, c, d] : [c, d, a, b];
+    const x = V0[0], y = H0[1];
+    return x > Math.min(H0[0], H1[0]) + EPS && x < Math.max(H0[0], H1[0]) - EPS &&
+      y > Math.min(V0[1], V1[1]) + EPS && y < Math.max(V0[1], V1[1]) - EPS ? 1 : 0;
+  }
+  const k = h ? 0 : 1, q = 1 - k; // along, across
+  if (Math.abs(a[q] - c[q]) >= EPS) return 0;
+  const lo = Math.max(Math.min(a[k], b[k]), Math.min(c[k], d[k])), hi = Math.min(Math.max(a[k], b[k]), Math.max(c[k], d[k]));
+  if (hi - lo < EPS) return 0;
+  // where a piece ends at e, the side its line turns to there; null where it runs on past e
+  const turn = (L, s, e) => {
+    const [u, v] = [L[s], L[s + 1]];
+    if (Math.abs(u[k] - e) >= EPS && Math.abs(v[k] - e) >= EPS) return null;
+    const nb = Math.abs(u[k] - e) < EPS ? L[s - 1] : L[s + 2];
+    return nb ? Math.sign(nb[q] - u[q]) : 0;
+  };
+  // the side Q's line is on relative to P's line at e (0: undecided)
+  const side = (e) => {
+    const tp = turn(P, i, e), tq = turn(Q, j, e);
+    if (tp === null) return tq ?? 0;
+    if (tq === null) return -tp;
+    return Math.sign(tq - tp);
+  };
+  const s0 = side(lo), s1 = side(hi);
+  return s0 !== 0 && s1 !== 0 && s0 !== s1 ? 1 : 0;
 }
 
 function bbox(pts) {

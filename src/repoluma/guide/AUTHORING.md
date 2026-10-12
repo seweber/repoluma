@@ -192,11 +192,14 @@ the main flow when the code has one.
 
 The viewer draws a flow only on relationships that exist in the map: each step
 highlights the relationship it uses. Set `via` to that relationship's id. It must touch
-the step's node (or a node containing it), in either direction, and need not start at
-the previous step: when a coordinator calls one service after another, each step's
-`via` is the coordinator's call. Without `via`, a relationship between the previous
-step's node and this one is used if there is one. If the code makes a move that no
-relationship describes, add the relationship; do not leave the step unconnected.
+the step's node (or a node containing it), in either direction, and continue from where
+the flow is: the previous step's node, or the other end of the relationship the previous
+step used. So when a coordinator calls one service after another, each step's `via` is
+the coordinator's call. Do not jump over nodes the work passes through (map file →
+parser → checker needs a step on the parser); only a relationship with an `actor` may
+start something anew. Without `via`, a relationship from where the flow is to this step's
+node is used if there is one. If the code makes a move that no relationship describes,
+add the relationship; do not leave the step unconnected.
 
 - Without `after`, a step follows the most recent `main` or `alternative` step.
   `failure` and `compensation` steps do not advance the main path, so the next main
@@ -280,6 +283,7 @@ Severities: `error` (fails validation), `warning` (likely mistake; fails with
 | `verb-kind`, `old-schema-version` | A `schema_version: 1` verb was converted; write `type` and point data from source to destination. |
 | `step-without-relationship` | A flow step has no relationship to be drawn on; set `via`, adding the relationship if the map lacks it. |
 | `step-via-mismatch` | `via` names a relationship that does not touch the step's node; name the one this step uses. |
+| `step-via-gap` | The step does not continue from the previous one (its node, or the other end of its relationship): add steps for the nodes in between. |
 | `ref-missing-file` | Path wrong or file moved/deleted. |
 | `ref-missing-symbol` | Symbol renamed/moved; use the qualified name (hint may suggest one). |
 | `ref-ambiguous` | Several definitions match; add a `lines` hint. |

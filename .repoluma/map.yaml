@@ -313,7 +313,7 @@ nodes:
     kind: responsibility
     label: Connection-driven placement
     summary: Places the items of each region so connected items sit close and items talking to other regions sit on the side facing them.
-    details: Stress majorization gives neutral positions, an optimal assignment snaps them to a grid, and local swaps shorten routes and avoid bends. Maps up to 1,500 nodes try several variants per region and keep the one that routes best.
+    details: Stress majorization gives neutral positions, an optimal assignment snaps them to a grid, and local swaps shorten routes and avoid bends. Maps up to 1,500 nodes try several variants per region and keep the one that routes best. Last, an item smaller than its grid cell moves within it to where its lines run straight.
     evidence: observed
     refs:
       - path: src/repoluma/web/js/arrange.js
@@ -362,7 +362,7 @@ nodes:
     kind: responsibility
     label: Orthogonal routing
     summary: Connects boxes with horizontal and vertical lines that avoid everything drawn, deciding the inside of nested regions before where a line crosses their borders.
-    details: A line may touch a box anywhere along a side. For each end, the ways out of every enclosing region are computed from the inside out (straight and L-shaped ways keep a range of border positions), and the region containing both ends picks the cheapest combination of a straight, L or Z line. Spots on box sides and borders are claimed so lines keep their spacing; finally, parallel pieces that run alongside each other are ordered by where they turn off and moved apart as little as needed. Only connections with identical endpoints share a line; flows add no lines of their own.
+    details: A line may touch a box anywhere along a side. For each end, the ways out of every enclosing region are computed from the inside out (straight and L-shaped ways keep a range of border positions, split and priced by the placed lines they would cross), and the region containing both ends picks the cheapest combination of a straight, L or Z line. Spots on box sides and borders are claimed so lines keep their spacing; finally, parallel pieces that run alongside each other are ordered by where they turn off and moved apart as little as needed. Only connections with identical endpoints share a line; flows add no lines of their own.
     evidence: observed
     refs:
       - path: src/repoluma/web/js/route.js
@@ -381,7 +381,7 @@ nodes:
     kind: responsibility
     label: Follow a flow
     summary: Shows a flow's numbered steps on the relationships they use, with dashed failure and compensation branches, and a step bar on the map to go back, forward or close.
-    details: The validator resolves which relationship each step is drawn on (its `via`, or one between the previous step's node and this one) and warns when there is none, so a flow never shows a connection the map does not have.
+    details: The validator resolves which relationship each step is drawn on (its `via`, or one from where the flow is to this step's node) and warns when there is none, so a flow never shows a connection the map does not have. It also warns when a step jumps over nodes the flow passes through, since only the steps' nodes and the ends of their relationships stay bright.
     evidence: observed
     refs:
       - path: src/repoluma/web/js/render.js
@@ -580,7 +580,9 @@ flows:
       - {id: init, node: first-run, label: Developer runs init and copies the prompt}
       - {id: guide, node: authoring-guide, label: Agent reads the guide that matches the installed version, via: agent-reads-guide}
       - {id: write, node: map-file, label: "Agent writes nodes, relationships, flows and refs", via: agent-writes-map}
-      - {id: validate, node: check-integrity, label: validate parses and checks integrity, via: analysis-validates}
+      - {id: parse, node: parse-map, label: validate parses the YAML safely and keeps line numbers, via: parse-reads-map}
+      - {id: validate, node: check-integrity, label: Integrity is checked against the format, via: integrity-after-parse}
+      - {id: analyze, node: analysis, label: The normalized model goes into the analysis, via: analysis-validates}
       - {id: resolve, node: resolve-ref, label: Every ref is resolved against the working tree, via: analysis-resolves}
       - {id: errors, node: diagnostics, kind: failure, after: resolve, label: "Errors: agent repairs using hints and re-runs", via: agent-runs-validate}
       - {id: done, node: analysis, label: Clean result; the viewer can open it}
@@ -598,7 +600,8 @@ flows:
       - {id: lod, node: draw-lod, label: Details become readable as boxes grow, via: lod-uses-camera}
       - {id: pane, node: code-panes, label: Code panes turn into real text, via: panes-placed-by-lod}
       - {id: fetch, node: source-cache, label: Visible excerpts are fetched, via: panes-fetch}
-      - {id: refused, node: confinement, kind: failure, after: fetch, label: "Unreferenced, excluded or escaping paths are refused", via: api-source-confined}
+      - {id: source, node: http-api, label: Served by /api/source, via: cache-requests-source}
+      - {id: refused, node: confinement, kind: failure, after: source, label: "Unreferenced, excluded or escaping paths are refused", via: api-source-confined}
 
   - id: flow-refresh
     label: Refresh after a source change
@@ -609,5 +612,6 @@ flows:
       - {id: detect, node: change-detection, label: Stat tokens of the map and referenced files changed}
       - {id: reanalyze, node: analysis, label: Map re-validated and refs re-resolved, via: change-detection-reanalyzes}
       - {id: missing, node: diagnostics, kind: failure, after: reanalyze, label: "Symbol renamed: shown as missing, never retargeted"}
+      - {id: serve, node: http-api, label: The page receives the new model and resolutions, via: api-serves-analysis}
       - {id: relayout, node: layout, label: Layout rebuilt; camera anchored on the selection, via: layout-consumes-api}
       - {id: refetch, node: source-cache, label: Excerpts of changed files invalidated and refetched, via: cache-requests-source}

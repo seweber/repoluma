@@ -215,6 +215,57 @@ flows:
     assert {"step-without-relationship", "step-via-mismatch"} <= codes(r, "warning")
 
 
+def test_flow_steps_continue_from_where_the_flow_is():
+    """A step that jumps over a node the work passes through is reported (the viewer
+    would dim that node); a coordinator's calls and an actor starting anew are no jumps."""
+    r = check(
+        """
+schema_version: 2
+scope: {summary: test}
+nodes:
+  - {id: file, label: File, kind: resource}
+  - {id: parse, label: Parse, kind: component}
+  - {id: check, label: Check, kind: component}
+  - {id: hub, label: Hub, kind: component}
+  - {id: user, label: User, kind: actor}
+relationships:
+  - {id: read, from: file, to: parse, type: data}
+  - {id: parsed, from: parse, to: check, type: data}
+  - {id: hub-file, from: hub, to: file, type: data}
+  - {id: hub-check, from: hub, to: check, type: data}
+  - {id: user-hub, from: user, to: hub, type: control, kind: triggers}
+flows:
+  - id: skips
+    steps:
+      - {id: a, node: file, label: a}
+      - {id: b, node: check, label: b, via: parsed}
+  - id: through
+    steps:
+      - {id: a, node: file, label: a}
+      - {id: b, node: parse, label: b, via: read}
+      - {id: c, node: check, label: c, via: parsed}
+  - id: coordinated
+    steps:
+      - {id: a, node: file, label: a, via: hub-file}
+      - {id: b, node: check, label: b, via: hub-check}
+      - {id: c, node: hub, label: back at the coordinator}
+  - id: restarted
+    steps:
+      - {id: a, node: check, label: a}
+      - {id: b, node: hub, label: b, via: user-hub}
+"""
+    )
+    gaps = [d for d in r.diagnostics if d.code == "step-via-gap"]
+    assert [(d.record, d.location) for d in gaps] == [("skips", "flows[0].steps[1].via")]
+    assert gaps[0].severity == "warning"
+    links = {f["id"]: [s["link"] for s in f["steps"]] for f in r.model["flows"]}
+    # the jumping step is still drawn on its relationship; only the gap is reported
+    assert links["skips"] == [None, "parsed"]
+    # without via, the coordinator's end of the previous step's call is where the flow is
+    assert links["coordinated"] == ["hub-file", "hub-check", "hub-check"]
+    assert links["restarted"] == [None, "user-hub"]
+
+
 def test_ref_forms():
     r = check(MINIMAL + "    refs: ['x.py#f', 'y.py:3-9', 'z.md']\n")
     refs = r.model["nodes"][1]["refs"]

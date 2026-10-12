@@ -1076,8 +1076,13 @@ def _link_steps(steps, by_id, relationships, rel_by_id, v, loc, ident) -> None:
 
     A flow only highlights relationships that exist in the map. `via` names the
     relationship a step uses; it must touch the step's node (or a node containing it or
-    inside it). Without `via`, a relationship between the previous step's node and this
-    one is used: the closest fit (exact ends before containing ones), then map order.
+    inside it) and continue from where the flow is: the previous step's node, or the other
+    end of the relationship that step was drawn along (a coordinator calling one service
+    after another). Otherwise the flow jumps, and the nodes it skips are not part of it;
+    only an actor (outside the system) can start something anew.
+    Without `via`, a relationship from where the flow is to this step's node is used: the
+    previous step's node first, then the closest fit (exact ends before containing ones),
+    then map order.
     """
 
     def ancestry(nid: str) -> dict[str, int]:
@@ -1108,44 +1113,62 @@ def _link_steps(steps, by_id, relationships, rel_by_id, v, loc, ident) -> None:
     usable = [
         r for r in relationships if r["from"] in by_id and r["to"] in by_id and r["from"] != r["to"]
     ]
+    def touches(rel: dict, nid: str) -> bool:
+        return distance(rel["from"], nid) is not None or distance(rel["to"], nid) is not None
+
     for j, s in enumerate(steps):
         s["link"] = None
         node = s["node"]
         if not node:
             continue
         sloc = f"{loc}.steps[{j}]"
+        prev = by_sid.get(s["after"]) if s["after"] else None
+        # where the flow is when this step starts: the previous step's node, then the other
+        # end of the relationship that step was drawn along
+        here: list[str] = []
+        if prev is not None and prev["node"]:
+            here.append(prev["node"])
+            if prev["link"]:
+                pr = rel_by_id[prev["link"]]
+                here += [e for e in (pr["from"], pr["to"]) if e not in here]
         if s["via"]:
             rel = rel_by_id[s["via"]]
-            if (
-                rel["from"] in by_id
-                and rel["to"] in by_id
-                and (
-                    distance(rel["from"], node) is not None or distance(rel["to"], node) is not None
+            if rel["from"] not in by_id or rel["to"] not in by_id or not touches(rel, node):
+                v.add(
+                    "warning",
+                    "step-via-mismatch",
+                    f"'via: {s['via']}' does not touch this step's node '{node}'",
+                    f"{sloc}.via",
+                    None,
+                    ident,
+                    hint="name a relationship of this step's node (or of a node containing it)",
                 )
-            ):
-                s["link"] = s["via"]
+                v.diags[-1].line = s["line"]
                 continue
-            v.add(
-                "warning",
-                "step-via-mismatch",
-                f"'via: {s['via']}' does not touch this step's node '{node}'",
-                f"{sloc}.via",
-                None,
-                ident,
-                hint="name a relationship of this step's node (or of a node containing it)",
-            )
-            v.diags[-1].line = s["line"]
+            s["link"] = s["via"]
+            by_actor = any(by_id[e]["kind"] == "actor" for e in (rel["from"], rel["to"]))
+            if here and not by_actor and not any(touches(rel, h) for h in here):
+                v.add(
+                    "warning",
+                    "step-via-gap",
+                    f"'via: {s['via']}' does not continue from step '{prev['id']}' on "
+                    f"'{prev['node']}': the flow jumps over the nodes in between",
+                    f"{sloc}.via",
+                    None,
+                    ident,
+                    hint=f"add a step for each node the flow passes between '{prev['node']}' and "
+                    f"'{node}' (only an actor can start something anew)",
+                )
+                v.diags[-1].line = s["line"]
             continue
-        prev = by_sid.get(s["after"]) if s["after"] else None
-        if prev is None or not prev["node"] or prev["node"] == node:
+        if not here or here[0] == node:
             continue
-        fits = [
-            (f, i, r)
-            for i, r in enumerate(usable)
-            if (f := between(r, prev["node"], node)) is not None
-        ]
-        if fits:
-            s["link"] = min(fits, key=lambda x: (x[0], x[1]))[2]["id"]
+        for h in here:
+            fits = [(f, i, r) for i, r in enumerate(usable) if (f := between(r, h, node)) is not None]
+            if fits:
+                s["link"] = min(fits, key=lambda x: (x[0], x[1]))[2]["id"]
+                break
+        if s["link"]:
             continue
         v.add(
             "warning",

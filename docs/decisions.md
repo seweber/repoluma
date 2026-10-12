@@ -77,7 +77,10 @@ orthogonal connector routing (Wybrow, Marriott, Stuckey 2009).
   need bends. Sizes are computed bottom-up; then, top-down, each region is re-arranged
   within its fixed size with *anchors* that pull items toward the side where their outside
   partners are. Maps up to 1,500 nodes also try a few variants per region and keep the one
-  that routes best.
+  that routes best. Last, an item smaller than its grid cell moves within the cell to
+  where its lines can run straight: level with partners beside it, in line with those
+  above or below (otherwise it stays at the top of its row). A short box next to a tall
+  one in the same row would otherwise force a bend on every line between them.
 - *Routing* (`route.js`) follows a few rules that apply everywhere, with no special
   cases per situation:
   1. **Obstacles.** A line never passes through anything drawn — boxes, the region's
@@ -86,7 +89,9 @@ orthogonal connector routing (Wybrow, Marriott, Stuckey 2009).
   2. **Sides, not points.** A line may touch a box anywhere within a side's usable range.
   3. **Simplest shape.** Within a region a line takes the cheapest straight, L or Z
      shape through free space, priced by length, bends, short jogs, crossings and running
-     alongside other lines; a bend-penalised path through the grid channels is the
+     alongside other lines (two lines sharing a stretch count as crossing when they leave
+     it on opposite sides at its two ends: spread apart, they must cross); a
+     bend-penalised path through the grid channels is the
      fallback. Option pairs are tried in order of a lower bound (branch and bound). A
      crossing costs more than the two bends that pass a line instead. Where a claimed spot
      is wanted, the free spot on either side is tried (passing a line on its one or other
@@ -98,6 +103,13 @@ orthogonal connector routing (Wybrow, Marriott, Stuckey 2009).
      the cheapest combination. A way out of any other shape still keeps the range its last
      piece can slide along the border. A border crossing is therefore never fixed before
      the inside is known (the cause of the earlier steps right after entering a region).
+     Where on the border a line crosses decides which placed lines its inside part
+     crosses, so a range is split where that changes and each stretch is priced with its
+     crossings; positions where the line would share a lane with placed lines (one lane
+     per line, as separation will spread them) are not offered. Per side, the cheapest
+     stretch and the cheapest one apart from it are offered, and an L way out tries both
+     free spots beside a claimed one: passing a line on its one or other side is a
+     different topology, which only the whole line can judge.
   5. **Claims.** Spots on box sides and region borders are claimed as lines are placed
      (sorted per side), so lines keep `sep` apart by construction; only when no path can
      respect the claims does a line take the spot farthest from the others.
@@ -106,7 +118,7 @@ orthogonal connector routing (Wybrow, Marriott, Stuckey 2009).
      is placed again with all others known and keeps the new way only if it crosses fewer
      lines; then the same for the lines crossing one that moved. It costs about one more
      routing pass, so maps with more than 1,500 nodes skip it (as they skip arrangement
-     candidates).
+     candidates and the crossing-priced ways out of rule 4).
   7. **Separation.** Parallel pieces that run alongside each other are first put in
      order: by position, except that pieces close together (within three line spacings)
      are ordered by where their lines turn off, so they do not cross there. A sweep line
@@ -115,10 +127,17 @@ orthogonal connector routing (Wybrow, Marriott, Stuckey 2009).
      that order `sep` apart (projection), within bounds taken from the geometry — never
      into a box, never past a neighbouring corner.
   Every relationship is its own line; only identical endpoints share one. In a region
-  with more than 400 lines, crossings and running alongside are no longer priced (speed).
+  with more than 400 lines, crossings and running alongside are no longer priced, and
+  beyond 100 lines ways out are not split by crossings (speed: single lines can no longer
+  be followed there anyway).
 - *Flows* add no lines and do not influence placement. Each step is drawn on the
-  relationship it uses (`via`, else one between the previous step's node and this one),
-  resolved once by the validator, which warns when a step has none. Earlier versions drew
+  relationship it uses (`via`, else one from where the flow is to this step's node),
+  resolved once by the validator, which warns when a step has none. A step continues from
+  where the flow is — the previous step's node, or the other end of the relationship that
+  step was drawn on (a coordinator calling one service after another) — unless an actor
+  starts something anew; otherwise the validator warns (`step-via-gap`). The viewer keeps
+  only a flow's steps and the ends of their relationships bright, so a step that jumped
+  left the nodes in between dimmed although the flow passes through them. Earlier versions drew
   a line from each step to the next; for flows run by a coordinator that showed
   connections the map does not have (checkout form → pricing, where the order service
   calls pricing).
@@ -140,6 +159,14 @@ stress map that meant 7.7 million constraints in one region, and the pairwise sw
 could contradict each other. Deciding the order first and pairing only neighbours fixed
 both. Obstacle lookups use a spatial index per region.
 
+Later, two lines between the same regions still crossed with some fonts (the ways out of
+"Validate a map" and "Serve the viewer" on the self-map). Ways out were priced without the
+lines already placed inside the region, a sliding way out ignored them entirely (and kept
+a larger clearance from title text than paths need, so it often could not slide at all),
+lines sharing a lane before separation counted as not crossing, and only the cheapest way
+out per side reached the parent, so the crossing-free alternative never did. Rip-up could
+not repair what was never offered. Each of these was fixed where it arose (see rule 4).
+
 **Observed** (`bench/layout_eval.py`, relationship lines; crossings / bends / small steps;
 zero overlaps and zero lines through boxes on all three). Since flows stopped pulling on
 placement, requests went from 48 to 28 crossings and repoluma from 15 to 11. After the
@@ -151,6 +178,11 @@ shop 26); the numbers below are for those:
 | shop | 10 | 33 | 2 |
 | repoluma | 5 | 33 | 1 |
 | requests | 29 | 62 | 2 |
+
+Text metrics change the layout, so these depend on the browser's fonts. With Noto Sans
+as the UI font, crossing-aware ways out and placement within cells (2026-10-12) took
+shop from 10 / 34 / 2 to 10 / 30 / 0 and repoluma from 7 / 39 / 2 to 5 / 33 / 0, still
+with no overlaps and no lines through boxes.
 
 Rip-up and the crossing price removed crossings a single pass could not avoid (two lines
 between the same regions taking each other's side); where ends cannot line up, a short

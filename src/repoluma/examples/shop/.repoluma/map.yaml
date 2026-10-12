@@ -339,7 +339,7 @@ flows:
     summary: From checkout form to confirmed order, including the declined-payment path.
     evidence: observed
     steps:
-      - {id: submit, node: checkout-form, label: Customer submits cart and payment token}
+      - {id: submit, node: checkout-form, label: Customer submits cart and payment token, via: form-submits-order}
       - {id: validate, node: cart-limits, label: Check line count and quantities, via: order-enforces-limits}
       - {id: price, node: pricing, label: Price the cart from the catalog, via: order-prices}
       - {id: reserve, node: reserve-stock, label: Reserve every line or fail, via: order-reserves}

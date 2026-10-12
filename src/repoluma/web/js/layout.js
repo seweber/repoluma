@@ -318,7 +318,8 @@ export function layoutNets(model) {
  */
 export function computeLayout(model, refInfo, measure, opts = {}) {
   const byId = new Map(model.nodes.map((n) => [n.id, n]));
-  // candidate search and rip-up cost time in proportion to the map; only small maps get them
+  // candidate search, rip-up and crossing-priced ways out cost time in proportion to the
+  // map; only small maps get them
   const large = model.nodes.length > 1500;
   const boxes = new Map();
   const panes = new Map();
@@ -516,6 +517,66 @@ export function computeLayout(model, refInfo, measure, opts = {}) {
     }
   }
 
+  // --- phase 3: an item smaller than its grid cell moves within the cell to where its
+  // lines can run straight: level with the partners beside it (and in line with those
+  // above or below). Region by region from the top, once everything has a position.
+  const rectOf = (id) => { const b = boxes.get(id); return [b.x, b.y, b.x + b.w * b.scale, b.y + b.h * b.scale]; };
+  // per item, the lines of its subtree to nodes outside it (not to its own ancestors):
+  // [end inside, end outside, weight]
+  const leaving = new Map();
+  for (const net of nets) {
+    const ca = ancestors.get(net.from), cb = ancestors.get(net.to);
+    let k = 0;
+    while (k < ca.length && k < cb.length && ca[k] === cb[k]) k++;
+    for (const [chain, other, a, o] of [[ca, cb, net.from, net.to], [cb, ca, net.to, net.from]]) {
+      if (k === other.length) continue; // the other end contains this one
+      for (let i = k; i < chain.length; i++) {
+        if (!leaving.has(chain[i])) leaving.set(chain[i], []);
+        leaving.get(chain[i]).push([a, o, net.w]);
+      }
+    }
+  }
+  const shift = (b, dx, dy) => {
+    b.x += dx;
+    b.y += dy;
+    for (const it of b.items || []) if (it.kind === "node") shift(it.box, dx, dy); else Object.assign(it.box, { x: it.box.x + dx, y: it.box.y + dy });
+  };
+  for (const cid of containerOrder) {
+    const C = cid === null ? null : boxes.get(cid);
+    const g = C ? C.grid : rootGrid, s = C ? C.scale : 1;
+    const [ox, oy] = C ? [C.frame.ox, C.frame.oy] : [0, 0];
+    const ids = C ? C.node.children : roots;
+    ids.forEach((id, i) => {
+      const b = boxes.get(id), { c, r } = g.pos[i];
+      const it = C ? C.items[i] : { lx: b.x, ly: b.y };
+      const w = C ? it.w : b.w, h = C ? it.h : b.h;
+      if (!leaving.has(id)) return;
+      const outside = leaving.get(id).map(([a, o, wt]) => [rectOf(a), rectOf(o), wt]);
+      // along axis k: the offset within the cell where the most lines can run straight
+      const best = (k, lo, hi) => {
+        const q = 1 - k; // partners apart along q can be met straight along k
+        const lines = outside.filter(([a, o]) => a[q + 2] <= o[q] || o[q + 2] <= a[q]);
+        if (!lines.length || hi - lo < 1e-6) return 0;
+        // how far a line's ends face each other, up to half the shorter side
+        const facing = (d) => lines.reduce((sum, [a, o, wt]) => sum + wt * clampN(Math.min(a[k + 2] + d, o[k + 2]) -
+          Math.max(a[k] + d, o[k]), 0, Math.min(a[k + 2] - a[k], o[k + 2] - o[k]) / 2), 0);
+        const centred = lines.map(([a, o]) => clampN((o[k] + o[k + 2] - a[k] - a[k + 2]) / 2, lo, hi));
+        let d0 = 0, f0 = facing(0);
+        for (const d of [lo, hi, ...centred]) {
+          const f = facing(d);
+          if (f > f0 + 1e-6 || (Math.abs(f - f0) <= 1e-6 && Math.abs(d) < Math.abs(d0))) { d0 = d; f0 = f; }
+        }
+        return d0;
+      };
+      // free room in the cell, in world units relative to where the item is now
+      const dx = best(0, (ox + g.colX[c] - it.lx) * s, (ox + g.colX[c] + g.colW[c] - w - it.lx) * s);
+      const dy = best(1, (oy + g.rowY[r] - it.ly) * s, (oy + g.rowY[r] + g.rowH[r] - h - it.ly) * s);
+      if (!dx && !dy) return;
+      if (C) { it.lx += dx / s; it.ly += dy / s; }
+      shift(b, dx, dy);
+    });
+  }
+
   // --- routing levels
   const mkLevel = (C, childIds, childBoxes, scaleK) => {
     C.itemIndex = new Map(childIds.map((id, i) => [id, i]));
@@ -539,7 +600,7 @@ export function computeLayout(model, refInfo, measure, opts = {}) {
     mkLevel(b, b.node.children, b.node.children.map((id) => boxes.get(id)), K);
   }
   const L = { boxes, root, ancestors, containerOrder };
-  const routes = routeNets(L, nets, { ripUp: !large });
+  const routes = routeNets(L, nets, { thorough: !large });
 
   let minScale = 1;
   for (const b of boxes.values()) minScale = Math.min(minScale, b.scale);

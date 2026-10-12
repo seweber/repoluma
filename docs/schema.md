@@ -59,11 +59,18 @@ way, with a `verb-kind` warning.
 ## Flows are drawn on relationships
 
 A flow step is shown by highlighting the relationship it uses: `via`, which must touch
-the step's node or a node containing it (or inside it), or else a relationship between
-the previous step's node and this one (exact ends first, then containing nodes, then map
-order). The resolved id is the step's `link` in the model the viewer receives. A step
-without one gets only its numbered badge, and `validate` warns
-(`step-without-relationship`, `step-via-mismatch`). Flows add no lines and do not
+the step's node or a node containing it (or inside it), or else a relationship from where
+the flow is to this step's node (exact ends first, then containing nodes, then map order).
+The resolved id is the step's `link` in the model the viewer receives. A step without one
+gets only its numbered badge, and `validate` warns (`step-without-relationship`,
+`step-via-mismatch`).
+
+*Where the flow is* when a step starts: the previous step's node, then the other end of
+the relationship that step was drawn on (so each step of a coordinator calling one
+service after another can be drawn on the coordinator's call). A step's `via` must touch
+one of these, unless one of its ends is an `actor` (actors start things anew); otherwise
+the flow jumps over the nodes in between, which the viewer then dims although the flow
+passes through them, and `validate` warns (`step-via-gap`). Flows add no lines and do not
 influence layout. These are warnings, so maps that were valid stay valid.
 
 ## Reference resolution semantics

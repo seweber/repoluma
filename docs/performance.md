@@ -50,7 +50,11 @@ out in about 40 ms. In regions with more than 400 lines, crossings and running a
 are no longer priced. Rip-up (placing crossing lines again) and the Zs that pass beside a
 crossed line added deep 2.8 s → 3.8 s, dense 2.6 s → 2.9 s, huge 7.5 s → 8.4 s (layout,
 `bench/layout_eval.py`); maps above 1,500 nodes skip the rip-up, which alone had made the
-huge map take 77 s.
+huge map take 77 s. Ways out of a region priced by the lines they cross, a second way out
+per side, and placing items within their grid cells (`docs/decisions.md` §3) added, in
+the same container: dense 2.8 s → 3.6 s, broad 1.3 s → 1.4 s, deep 4.2 s → 4.7 s, huge
+8.9 s → 9.7 s; shop and self-map unchanged at about 40 ms. Maps above 1,500 nodes keep
+the unpriced ways out, and regions with more than 100 lines are not split by crossings.
 
 The ~50 ms pane-open floor is three animation frames (draw, request, fill), not
 server time. "Layout" now includes connection-driven placement and orthogonal routing

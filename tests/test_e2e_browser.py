@@ -343,7 +343,9 @@ def test_no_small_steps_in_lines(page):
 def test_a_line_placed_early_does_not_force_a_crossing(selfmap):
     """Diagnostics (analysis -> diagnostics) is placed before the normalized model
     (check integrity -> analysis); both run between the same regions. Placed greedily, the
-    first took the side the second needed and forced a crossing; rip-up re-places it."""
+    first took the side the second needed and forced a crossing. Rip-up places it again,
+    and the ways out of a region are priced with the placed lines their inside part
+    crosses, so the crossing-free way out is offered at all."""
     pts = selfmap.evaluate("""(() => {
       const one = (id) => window.repoluma.layout.routes.filter((s) => s.members.some((m) => m.id === id))
         .map((s) => s.points);
@@ -351,6 +353,16 @@ def test_a_line_placed_early_does_not_force_a_crossing(selfmap):
     a, b = ([seg for pieces in line for seg in pairwise(pieces)] for line in pts)
     assert a and b
     assert not any(crosses(s, t) for s in a for t in b)
+
+
+def test_a_short_item_sits_level_with_its_partner(selfmap):
+    """Coding agent is much shorter than Discuss with an agent, in the same row. At the top
+    of its cell, its line to Reproducible view links (inside Discuss) needed two bends;
+    within its cell it moves to where that line runs straight."""
+    pts = selfmap.evaluate("""window.repoluma.layout.routes
+      .filter((s) => s.members.some((m) => m.id === 'agent-follows-links')).flatMap((s) => s.points)""")
+    assert pts
+    assert max(p[1] for p in pts) - min(p[1] for p in pts) < 1e-3
 
 
 def test_a_line_is_annotated_once(selfmap):
