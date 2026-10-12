@@ -1,0 +1,15 @@
+__pycache__/
+*.pyc
+.venv/
+dist/
+build/
+*.egg-info/
+.pytest_cache/
+.ruff_cache/
+.vscode/
+
+# repoluma local caches/session state (authored maps are tracked)
+.repoluma/cache/
+
+bench/results/*.local.json
+bench/out/

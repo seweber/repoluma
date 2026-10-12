@@ -1,0 +1,78 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<meta name="repoluma-token" content="__REPOLUMA_TOKEN__">
+<title>repoluma</title>
+<link rel="stylesheet" href="/static/app.css">
+<script type="module" src="/static/js/main.js"></script>
+</head>
+<body>
+<header id="topbar">
+  <div class="brand"><span class="logo" aria-hidden="true">◐</span> <span id="repo-name">repoluma</span></div>
+  <div class="searchbox" role="combobox" aria-haspopup="listbox" aria-owns="search-results">
+    <input id="search" type="search" placeholder="Search map ( / )" autocomplete="off" aria-label="Search the map" aria-controls="search-results">
+    <ul id="search-results" role="listbox" hidden></ul>
+  </div>
+  <nav id="crumbs" aria-label="Where the view is"></nav>
+  <div class="spacer"></div>
+  <span id="git" class="chip muted" title=""></span>
+  <button id="health" class="chip" title="Map validation and coverage"></button>
+  <button id="btn-help" class="icon-btn" title="Keyboard and mouse help (?)" aria-label="Help">?</button>
+</header>
+<main id="layout">
+  <aside id="sidebar" aria-label="Map navigation">
+    <div role="tablist" aria-orientation="vertical" class="tabs">
+      <button role="tab" data-tab="outline" aria-selected="true">Outline</button>
+      <button role="tab" data-tab="flows" aria-selected="false" tabindex="-1">Flows</button>
+      <button role="tab" data-tab="filters" aria-selected="false" tabindex="-1">Layers</button>
+      <button role="tab" data-tab="coverage" aria-selected="false" tabindex="-1">Coverage</button>
+    </div>
+    <div id="tab-outline" role="tabpanel" class="tabpanel"></div>
+    <div id="tab-flows" role="tabpanel" class="tabpanel" hidden></div>
+    <div id="tab-filters" role="tabpanel" class="tabpanel" hidden></div>
+    <div id="tab-coverage" role="tabpanel" class="tabpanel" hidden></div>
+  </aside>
+  <section id="stage" aria-label="Zoomable map. Use the outline for keyboard navigation.">
+    <canvas id="map" aria-hidden="true"></canvas>
+    <div id="panes"></div>
+    <div id="tip" class="tip" hidden></div>
+    <div class="map-controls" role="toolbar" aria-label="View">
+      <button id="btn-back" class="icon-btn" title="Back to previous view (b)" aria-label="Back" disabled>↶</button>
+      <button id="btn-fit" class="icon-btn" title="Fit whole map (0)" aria-label="Fit whole map">⤢</button>
+      <button id="btn-zoom-in" class="icon-btn" title="Zoom in (+)" aria-label="Zoom in">+</button>
+      <button id="btn-zoom-out" class="icon-btn" title="Zoom out (−)" aria-label="Zoom out">−</button>
+    </div>
+    <canvas id="minimap" title="Overview: click or drag to move"></canvas>
+    <div id="maplegend" aria-label="Legend"></div>
+    <div id="flowbar" role="toolbar" aria-label="Flow steps" hidden></div>
+    <div id="statusbar" aria-live="polite"></div>
+    <div id="toast" role="status" hidden></div>
+    <div id="conn" class="conn" hidden>Lost connection to the server; retrying…</div>
+    <div id="onboarding" hidden><div id="onboarding-body" class="card"></div></div>
+    <div id="help" class="card help" hidden>
+      <button id="help-close" class="icon-btn" aria-label="Close help">×</button>
+      <h2>Getting around</h2>
+      <table>
+        <tr><td>Wheel / pinch</td><td>Zoom around the pointer. Detail appears as things get larger.</td></tr>
+        <tr><td>Drag, arrow keys</td><td>Pan. Panning keeps the zoom, so nearby regions show the same depth.</td></tr>
+        <tr><td>Click</td><td>Select and inspect. Double-click or <kbd>Enter</kbd> zooms to it.</td></tr>
+        <tr><td>Click a code pane</td><td>Activates it: wheel scrolls code and text can be selected. <kbd>Esc</kbd> releases it.</td></tr>
+        <tr><td><kbd>Ctrl</kbd> + wheel</td><td>Always zooms, even over an active code pane.</td></tr>
+        <tr><td><kbd>Shift</kbd> + wheel</td><td>Pan sideways.</td></tr>
+        <tr><td><kbd>/</kbd></td><td>Search labels, ids, summaries and file paths.</td></tr>
+        <tr><td><kbd>0</kbd> / <kbd>b</kbd> / <kbd>u</kbd></td><td>Whole map / back to previous view / select the containing item.</td></tr>
+        <tr><td><kbd>n</kbd> / <kbd>p</kbd></td><td>Next / previous step of the active flow.</td></tr>
+        <tr><td><kbd>c</kbd></td><td>Copy the selection as text for a coding agent (ids, source, relationships, link).</td></tr>
+      </table>
+      <p class="small muted">The URL always describes the current view, selection, flow and layers: share it or paste it to an agent.</p>
+    </div>
+  </section>
+  <aside id="inspector" class="empty" aria-label="Inspector">
+    <button id="inspector-close" class="icon-btn" aria-label="Clear selection" title="Clear selection (Esc)">×</button>
+    <div id="inspector-body"></div>
+  </aside>
+</main>
+</body>
+</html>

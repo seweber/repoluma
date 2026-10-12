@@ -1,0 +1,613 @@
+# repoluma's own map, maintained with the public schema and validator.
+# Update it in the same change as the code it describes (see docs/development.md).
+schema_version: 2
+
+repository:
+  name: repoluma
+  description: A Python-distributed tool that turns an agent-authored, domain-first description of a repository into a zoomable map backed by live source code.
+
+scope:
+  summary: All shipped behavior of the package (CLI, map format and validation, source resolution, local server, browser viewer) and its tests. Each leaf points at the code that implements it.
+  covered:
+    - The authoring loop (init, guide, schema, validate)
+    - Source resolution, confinement and freshness
+    - The local server and its security checks
+    - Layout, semantic zoom, relationship promotion, flows and code panes in the viewer
+  not_covered:
+    - The bundled example repository's own content (it has its own map)
+    - Benchmark scripts beyond their entry points
+    - CSS styling details
+
+nodes:
+  # ------------------------------------------------------------------ authoring
+  - id: describe
+    kind: capability
+    label: Describe a repository
+    summary: A coding agent writes the map; repoluma supplies the format, instructions and a safe first run.
+    details: No model provider is embedded. The installed package prints its own guide so instructions always match the schema version.
+
+  - id: first-run
+    parent: describe
+    kind: responsibility
+    label: First run
+    summary: "`repoluma init` creates a placeholder map without overwriting anything and prints a prompt to hand to an agent."
+    evidence: observed
+    refs:
+      - path: src/repoluma/cli.py
+        symbol: cmd_init
+      - path: src/repoluma/cli.py
+        symbol: AGENT_PROMPT
+      - path: tests/test_cli.py
+        symbol: test_init_creates_placeholder_and_never_overwrites
+        role: test
+
+  - id: authoring-guide
+    parent: describe
+    kind: responsibility
+    label: Authoring guide
+    summary: Teaches agents to describe purpose before structure, attach evidence and report gaps; exportable as a skill file on request.
+    evidence: observed
+    refs:
+      - path: src/repoluma/guide/AUTHORING.md
+        symbol: Evidence honesty
+        role: docs
+      - path: src/repoluma/cli.py
+        symbol: cmd_guide
+
+  - id: map-format
+    parent: describe
+    kind: contract
+    label: Map format v2
+    summary: YAML with nodes (containment tree), relationships typed as data, control or dependency (arrows always from → to), flows with failure branches, and source references.
+    contract:
+      inputs: [YAML document with schema_version 2 (version 1 is converted)]
+      outputs: [Normalized model (JSON) consumed by the viewer]
+      guarantees:
+        - Ids are unique across nodes, relationships and flows
+        - Containment is a tree; other links are typed relationships
+        - A data relationship goes from where the data comes from to where it goes, labelled with the data
+        - Unknown fields are warned about; x- prefixed fields are ignored
+      assumptions: [Newer schema versions are refused with an upgrade hint]
+    evidence: observed
+    refs:
+      - path: src/repoluma/model.py
+        symbol: json_schema
+        role: schema
+      - path: src/repoluma/model.py
+        symbol: _rel_type
+      - path: tests/test_model.py
+        symbol: test_json_schema_agrees_with_examples
+        role: test
+      - path: tests/test_model.py
+        symbol: test_schema_version_1_relationships_are_converted
+        role: test
+
+  # ----------------------------------------------------------------- validation
+  - id: validate
+    kind: capability
+    label: Validate a map
+    summary: Turns a possibly broken map into diagnostics an agent can act on, plus a best-effort model the viewer can still show.
+
+  - id: parse-map
+    parent: validate
+    kind: responsibility
+    label: Parse safely
+    summary: Safe YAML loading that remembers line numbers for every record; no Python objects can be constructed.
+    evidence: observed
+    refs:
+      - path: src/repoluma/model.py
+        symbol: parse_yaml
+      - path: src/repoluma/model.py
+        symbol: _LineLoader
+
+  - id: check-integrity
+    parent: validate
+    kind: responsibility
+    label: Check integrity
+    summary: Required fields, id rules, references between records, containment cycles, flow step ordering.
+    details: Lenient by design. Broken parents become top level and broken relationships are dropped, each with a diagnostic, so a partial map stays viewable.
+    evidence: observed
+    refs:
+      - path: src/repoluma/model.py
+        symbol: validate_document
+      - path: tests/test_model.py
+        symbol: test_containment_cycle_is_broken_and_reported
+        role: test
+
+  - id: diagnostics
+    parent: validate
+    kind: contract
+    label: Diagnostics
+    summary: Each problem names severity, code, record id, map line and a repair hint; available as text or JSON.
+    contract:
+      outputs: ["severity, code, message, location, line, record, hint"]
+      guarantees: [Exit status 1 when there are errors (or warnings with --strict)]
+    evidence: observed
+    refs:
+      - path: src/repoluma/model.py
+        symbol: Diagnostic
+      - path: src/repoluma/cli.py
+        symbol: cmd_validate
+
+  # ------------------------------------------------------------------- evidence
+  - id: evidence
+    kind: capability
+    label: Resolve source evidence
+    summary: Finds what each reference points to in the working tree, safely, and says how sure that resolution is.
+
+  - id: resolve-ref
+    parent: evidence
+    kind: contract
+    label: Reference resolution
+    summary: path + optional symbol + optional line hint becomes a line range with a status.
+    contract:
+      inputs: ["{path, symbol?, lines?}"]
+      outputs: ["status: resolved, heuristic, lines, file, moved, ambiguous, missing_symbol, missing_file, excluded..."]
+      guarantees:
+        - Python symbols are matched exactly by syntax tree, never by similarity
+        - An uncertain match is reported as heuristic, ambiguous or moved, never silently retargeted
+      errors: [missing_file, missing_symbol, ambiguous, out_of_range, excluded, binary, too_large]
+    evidence: observed
+    refs:
+      - path: src/repoluma/sources.py
+        symbol: Repository.resolve
+      - path: tests/test_sources.py
+        symbol: test_python_never_resolves_to_a_different_symbol
+        role: test
+
+  - id: python-symbols
+    parent: evidence
+    kind: responsibility
+    label: Python symbols
+    summary: Indexes qualified names of classes, functions and module constants with ast.parse (parsing only, no import).
+    evidence: observed
+    refs:
+      - path: src/repoluma/sources.py
+        symbol: Repository._python_index
+
+  - id: text-heuristics
+    parent: evidence
+    kind: responsibility
+    label: Other languages
+    summary: Definition-like text patterns plus brace or indentation matching; Markdown headings; TOML tables. Disclosed as approximate.
+    evidence: observed
+    refs:
+      - path: src/repoluma/sources.py
+        symbol: _heuristic_spans
+      - path: tests/test_sources.py
+        symbol: test_heuristics_for_other_languages
+        role: test
+
+  - id: confinement
+    parent: evidence
+    kind: rule
+    label: Source confinement
+    summary: Only regular files inside the root after symlink resolution, never excluded files (secrets, VCS, caches), never binary or huge files.
+    evidence: observed
+    refs:
+      - path: src/repoluma/sources.py
+        symbol: Repository.safe_path
+      - path: src/repoluma/sources.py
+        symbol: DEFAULT_EXCLUDES
+      - path: tests/test_sources.py
+        symbol: test_symlink_escaping_root_is_refused
+        role: test
+
+  - id: freshness
+    parent: evidence
+    kind: responsibility
+    label: Freshness and staleness
+    summary: Reports HEAD, uncommitted files, and which referenced files changed since the map's reviewed revision.
+    details: Git runs read-only with hooks and fsmonitor disabled, so viewing a repository cannot execute its configuration.
+    evidence: observed
+    refs:
+      - path: src/repoluma/sources.py
+        symbol: git_state
+      - path: src/repoluma/sources.py
+        symbol: _git
+      - path: tests/test_freshness.py
+        symbol: test_git_config_cannot_run_commands
+        role: test
+
+  - id: coverage
+    parent: evidence
+    kind: responsibility
+    label: Coverage summary
+    summary: Per-directory counts of files the map references, an honest signal of unmodeled areas.
+    evidence: observed
+    refs:
+      - path: src/repoluma/sources.py
+        symbol: coverage
+
+  - id: working-tree
+    parent: evidence
+    kind: resource
+    label: Working tree
+    summary: The repository's files as they are now, including uncommitted edits. The single source of displayed code.
+    evidence: observed
+    refs:
+      - path: src/repoluma/sources.py
+        symbol: Repository.read
+
+  # --------------------------------------------------------------------- server
+  - id: serve
+    kind: capability
+    label: Serve the viewer
+    summary: A standard-library HTTP server on loopback that hands the browser the analyzed map and bounded source excerpts.
+
+  - id: analysis
+    parent: serve
+    kind: responsibility
+    label: Analyze workspace
+    summary: Validates the map, resolves every reference once, and gathers git and coverage context into one payload.
+    evidence: observed
+    refs:
+      - path: src/repoluma/workspace.py
+        symbol: Workspace.analyze
+
+  - id: http-api
+    parent: serve
+    kind: contract
+    label: Viewer HTTP API
+    summary: GET /api/bootstrap, /api/status, /api/source; static assets; everything else refused.
+    contract:
+      inputs:
+        - "X-Repoluma-Token header (from the served page)"
+        - "/api/source?path&start&end for a file the map references"
+      outputs:
+        - bootstrap = model, diagnostics, ref resolutions, git, coverage
+        - status = digest of map and referenced-file stats
+        - source = bounded line excerpt with a change token
+      guarantees: [Read-only, at most 2000 lines per excerpt]
+      errors: [403 wrong Host, Origin or token; 405 non-GET; error field for unservable files]
+    evidence: observed
+    refs:
+      - path: src/repoluma/server.py
+        symbol: make_handler
+      - path: tests/test_server.py
+        symbol: test_source_endpoint_serves_only_referenced_files
+        role: test
+
+  - id: request-guard
+    parent: serve
+    kind: rule
+    label: Local-only access
+    summary: Loopback by default, Host allow-list against DNS rebinding, per-process token, cross-origin refusal, strict CSP.
+    evidence: observed
+    refs:
+      - path: src/repoluma/server.py
+        symbol: create_server
+      - path: tests/test_server.py
+        symbol: test_dns_rebinding_host_refused
+        role: test
+
+  - id: change-detection
+    parent: serve
+    kind: responsibility
+    label: Change detection
+    summary: Caches the analysis and recomputes it when the map or a referenced file changes (stat tokens), so polling is cheap.
+    evidence: observed
+    refs:
+      - path: src/repoluma/server.py
+        symbol: ViewerState
+
+  # --------------------------------------------------------------------- viewer
+  - id: navigate
+    kind: capability
+    label: Navigate meaning
+    summary: One zoomable map in the browser; detail appears as things get larger, consistently everywhere.
+
+  - id: layout
+    parent: navigate
+    kind: responsibility
+    label: Nested layout
+    summary: Sizes regions bottom-up and places them top-down at a constant scale step, so every node at the same depth has the same on-screen size at any zoom.
+    details: Geometry depends only on the map, never on zoom, filters or selection, so the map does not rearrange while navigating.
+    evidence: observed
+    refs:
+      - path: src/repoluma/web/js/layout.js
+        symbol: computeLayout
+
+  - id: arrange
+    parent: navigate
+    kind: responsibility
+    label: Connection-driven placement
+    summary: Places the items of each region so connected items sit close and items talking to other regions sit on the side facing them.
+    details: Stress majorization gives neutral positions, an optimal assignment snaps them to a grid, and local swaps shorten routes and avoid bends. Maps up to 1,500 nodes try several variants per region and keep the one that routes best.
+    evidence: observed
+    refs:
+      - path: src/repoluma/web/js/arrange.js
+        symbol: arrange
+      - path: src/repoluma/web/js/arrange.js
+        symbol: stress
+      - path: src/repoluma/web/js/layout.js
+        symbol: bestArrangement
+
+  - id: constant-scale
+    parent: navigate
+    kind: rule
+    label: One scale everywhere
+    summary: The child scale step K is global; panning at a fixed zoom shows comparable detail in every region.
+    evidence: observed
+    refs:
+      - path: src/repoluma/web/js/layout.js
+        symbol: K
+      - path: src/repoluma/web/js/layout.js
+        symbol: PANE_K
+
+  - id: camera
+    parent: navigate
+    kind: component
+    label: Camera
+    summary: Pointer-anchored zoom, panning, and smooth fly-to (van Wijk and Nuij) that zooms out before travelling far.
+    evidence: observed
+    refs:
+      - path: src/repoluma/web/js/camera.js
+        symbol: Camera.flyTo
+      - path: src/repoluma/web/js/camera.js
+        symbol: interpolateZoom
+
+  - id: draw-lod
+    parent: navigate
+    kind: responsibility
+    label: Level of detail
+    summary: Draws only what is in view; text becomes readable, greeked, or an overview label depending on its projected size.
+    evidence: observed
+    refs:
+      - path: src/repoluma/web/js/render.js
+        symbol: Renderer.drawNode
+
+  - id: route-lines
+    parent: navigate
+    kind: responsibility
+    label: Orthogonal routing
+    summary: Connects boxes with horizontal and vertical lines that avoid everything drawn, deciding the inside of nested regions before where a line crosses their borders.
+    details: A line may touch a box anywhere along a side. For each end, the ways out of every enclosing region are computed from the inside out (straight and L-shaped ways keep a range of border positions), and the region containing both ends picks the cheapest combination of a straight, L or Z line. Spots on box sides and borders are claimed so lines keep their spacing; finally, parallel pieces that run alongside each other are ordered by where they turn off and moved apart as little as needed. Only connections with identical endpoints share a line; flows add no lines of their own.
+    evidence: observed
+    refs:
+      - path: src/repoluma/web/js/route.js
+        symbol: routeNets
+      - path: src/repoluma/web/js/route.js
+        symbol: Level.connect
+      - path: src/repoluma/web/js/route.js
+        symbol: Level.exitRanges
+      - path: src/repoluma/web/js/route.js
+        symbol: Level.separate
+      - path: src/repoluma/web/js/render.js
+        symbol: Renderer.drawSegments
+
+  - id: flow-overlay
+    parent: navigate
+    kind: responsibility
+    label: Follow a flow
+    summary: Shows a flow's numbered steps on the relationships they use, with dashed failure and compensation branches, and a step bar on the map to go back, forward or close.
+    details: The validator resolves which relationship each step is drawn on (its `via`, or one between the previous step's node and this one) and warns when there is none, so a flow never shows a connection the map does not have.
+    evidence: observed
+    refs:
+      - path: src/repoluma/web/js/render.js
+        symbol: Renderer.drawFlow
+      - path: src/repoluma/web/js/ui.js
+        symbol: renderFlowBar
+      - path: src/repoluma/web/js/main.js
+        symbol: App.setFlow
+      - path: src/repoluma/model.py
+        symbol: _link_steps
+
+  - id: panels
+    parent: navigate
+    kind: component
+    label: Inspector and panels
+    summary: Outline (keyboard-accessible tree), flows, layers, coverage, and an inspector with contract, evidence and relationships.
+    evidence: observed
+    refs:
+      - path: src/repoluma/web/js/ui.js
+        symbol: renderInspector
+      - path: src/repoluma/web/js/ui.js
+        symbol: renderCoverage
+
+  - id: filters
+    parent: navigate
+    kind: responsibility
+    label: Layers and filters
+    summary: Hide relationship types (data, control, dependency), node kinds or tags; hidden nodes keep their place as outlines and hidden counts stay visible. A legend on the map says what each line type and arrow means.
+    evidence: observed
+    refs:
+      - path: src/repoluma/web/js/main.js
+        symbol: App.recomputeHidden
+      - path: src/repoluma/web/js/main.js
+        symbol: App.updateStatusBar
+      - path: src/repoluma/web/js/ui.js
+        symbol: renderMapLegend
+
+  # ---------------------------------------------------------------- source panes
+  - id: inspect-source
+    kind: capability
+    label: Inspect source in the map
+    summary: Referenced code appears inside its node as a bounded, scrollable, selectable pane read live from the server.
+
+  - id: code-panes
+    parent: inspect-source
+    kind: component
+    label: Code panes
+    summary: DOM panes positioned with the camera transform once their text is large enough; inactive panes forward wheel and drag to the map.
+    details: Click activates a pane (wheel scrolls code, text is selectable); Esc releases it. Context lines can be expanded.
+    evidence: observed
+    refs:
+      - path: src/repoluma/web/js/panes.js
+        symbol: PaneLayer.update
+      - path: src/repoluma/web/js/main.js
+        symbol: App.bindEvents
+
+  - id: source-cache
+    parent: inspect-source
+    kind: component
+    label: Source cache
+    summary: Fetches visible excerpts with bounded concurrency, drops requests that scrolled out of view, invalidates changed files.
+    evidence: observed
+    refs:
+      - path: src/repoluma/web/js/panes.js
+        symbol: SourceCache
+
+  - id: highlight
+    parent: inspect-source
+    kind: component
+    label: Syntax colouring
+    summary: Approximate line tokenizer that only produces text nodes.
+    evidence: observed
+    refs:
+      - path: src/repoluma/web/js/highlight.js
+        symbol: tokenize
+
+  # ------------------------------------------------------------------ discussing
+  - id: discuss
+    kind: capability
+    label: Discuss with an agent
+    summary: Stable ids, links that restore the exact view, and copyable selection summaries make it easy to point an agent at a region.
+
+  - id: agent-summary
+    parent: discuss
+    kind: responsibility
+    label: Copy for agent
+    summary: Text with ids, containment path, contract, resolved source ranges, relationships, review candidates and a view link.
+    evidence: observed
+    refs:
+      - path: src/repoluma/web/js/main.js
+        symbol: App.agentSummary
+
+  - id: view-links
+    parent: discuss
+    kind: responsibility
+    label: Reproducible view links
+    summary: The URL fragment carries camera, selection, active flow step and filters.
+    evidence: observed
+    refs:
+      - path: src/repoluma/web/js/main.js
+        symbol: App.restoreFromHash
+
+  - id: impact
+    parent: discuss
+    kind: responsibility
+    label: Review candidates
+    summary: Walks modeled dependency relationships backwards up to three steps and shows the path, with a coverage disclaimer.
+    evidence: observed
+    refs:
+      - path: src/repoluma/web/js/ui.js
+        symbol: computeImpact
+
+  - id: change-overlay
+    parent: discuss
+    kind: responsibility
+    label: Proposed-change overlay
+    summary: Sketching a proposed change on top of the current map, kept visibly separate from implemented behavior.
+    evidence: planned
+
+  # -------------------------------------------------------------------- outside
+  - id: coding-agent
+    kind: actor
+    label: Coding agent
+    summary: Reads the guide and the repository, writes and repairs the map, runs validate.
+
+  - id: developer
+    kind: actor
+    label: Developer
+    summary: Explores the map in the browser and discusses regions with the agent.
+
+  - id: map-file
+    kind: resource
+    label: Map file
+    summary: .repoluma/map.yaml in the viewed repository, tracked in version control.
+    evidence: observed
+    refs:
+      - path: src/repoluma/__init__.py
+        symbol: DEFAULT_MAP_PATH
+
+relationships:
+  # data: from = where the data comes from, to = where it goes; label = the data
+  - {id: agent-reads-guide, from: authoring-guide, to: coding-agent, type: data, label: authoring instructions}
+  - {id: agent-writes-map, from: coding-agent, to: map-file, type: data, label: map YAML}
+  - {id: agent-runs-validate, from: diagnostics, to: coding-agent, type: data, label: errors with repair hints}
+  - {id: init-writes-map, from: first-run, to: map-file, type: data, label: placeholder map (only if missing), evidence: observed}
+  - {id: parse-reads-map, from: map-file, to: parse-map, type: data, label: map YAML, evidence: observed}
+  - {id: integrity-after-parse, from: parse-map, to: check-integrity, type: data, label: document with line numbers, evidence: observed}
+  - {id: integrity-reports, from: check-integrity, to: diagnostics, type: data, label: errors and warnings, evidence: observed}
+  - {id: analysis-validates, from: check-integrity, to: analysis, type: data, label: normalized model, evidence: observed}
+  - {id: resolve-reads-tree, from: working-tree, to: resolve-ref, type: data, label: file contents, evidence: observed}
+  - {id: resolve-python, from: python-symbols, to: resolve-ref, type: data, label: symbol line ranges (.py), evidence: observed}
+  - {id: resolve-heuristic, from: text-heuristics, to: resolve-ref, type: data, label: line ranges by text pattern, evidence: observed}
+  - {id: analysis-resolves, from: resolve-ref, to: analysis, type: data, label: resolution of every ref, evidence: observed}
+  - {id: freshness-reads-tree, from: working-tree, to: freshness, type: data, label: git status and diff, evidence: observed}
+  - {id: analysis-freshness, from: freshness, to: analysis, type: data, label: files changed since review, evidence: observed}
+  - {id: analysis-coverage, from: coverage, to: analysis, type: data, label: coverage per directory, evidence: observed}
+  - {id: validate-command-analyzes, from: analysis, to: diagnostics, type: data, label: diagnostics (same analysis as the viewer), evidence: observed}
+  - {id: api-serves-analysis, from: analysis, to: http-api, type: data, label: "model, resolutions, diagnostics", evidence: observed}
+  - {id: api-uses-analysis, from: change-detection, to: http-api, type: data, label: status digest, evidence: observed}
+  - {id: layout-consumes-api, from: http-api, to: layout, type: data, label: bootstrap (model and resolutions), evidence: observed}
+  - {id: layout-arranges, from: arrange, to: layout, type: data, label: positions per region, evidence: observed}
+  - {id: layout-routes, from: route-lines, to: layout, type: data, label: line routes, evidence: observed}
+  - {id: arrange-scores-routes, from: route-lines, to: arrange, type: data, label: routing scores of candidate arrangements, evidence: observed}
+  - {id: lod-uses-layout, from: layout, to: draw-lod, type: data, label: boxes and routes, evidence: observed}
+  - {id: lod-uses-camera, from: camera, to: draw-lod, type: data, label: zoom and position, evidence: observed}
+  - {id: panes-placed-by-lod, from: draw-lod, to: code-panes, type: data, label: visible panes, evidence: observed}
+  - {id: cache-requests-source, from: http-api, to: source-cache, type: data, label: excerpts (/api/source), evidence: observed}
+  - {id: panes-fetch, from: source-cache, to: code-panes, type: data, label: source lines, evidence: observed}
+  - {id: panes-highlight, from: highlight, to: code-panes, type: data, label: highlighted tokens, evidence: observed}
+  - {id: panels-show-diagnostics, from: diagnostics, to: panels, type: data, label: diagnostics, evidence: observed}
+  - {id: panels-impact, from: impact, to: panels, type: data, label: review candidates, evidence: observed}
+  - {id: summary-uses-impact, from: impact, to: agent-summary, type: data, label: review candidates, evidence: observed}
+  - {id: summary-links, from: view-links, to: agent-summary, type: data, label: view links, evidence: observed}
+  - {id: summary-to-agent, from: agent-summary, to: coding-agent, type: data, label: "ids, refs and links (pasted)"}
+  - {id: developer-explores, from: developer, to: camera, type: data, label: "wheel, drag and keys"}
+  # control: from starts or drives to (no data movement says it)
+  - {id: change-detection-reanalyzes, from: change-detection, to: analysis, type: control, kind: triggers, label: when stats change, evidence: observed}
+  - {id: developer-copies, from: developer, to: agent-summary, type: control, kind: triggers, label: Copy for agent}
+  # dependency: from relies on, implements or is constrained or checked by to
+  - {id: guide-documents-format, from: authoring-guide, to: map-format, type: dependency, kind: documents, evidence: observed}
+  - {id: integrity-enforces-format, from: check-integrity, to: map-format, type: dependency, kind: enforces, evidence: observed}
+  - {id: resolve-confined, from: resolve-ref, to: confinement, type: dependency, kind: relies_on, evidence: observed}
+  - {id: api-guarded, from: http-api, to: request-guard, type: dependency, kind: enforces, evidence: observed}
+  - {id: api-source-confined, from: http-api, to: confinement, type: dependency, kind: relies_on, label: referenced files only, evidence: observed}
+  - {id: layout-constant-scale, from: layout, to: constant-scale, type: dependency, kind: enforces, evidence: observed}
+  - {id: flows-use-routes, from: flow-overlay, to: route-lines, type: dependency, kind: depends_on, label: steps drawn on relationship lines, evidence: observed}
+  - {id: filters-affect-lines, from: route-lines, to: filters, type: dependency, kind: relies_on, label: hidden relationship types, evidence: observed}
+  - {id: agent-follows-links, from: coding-agent, to: view-links, type: dependency, kind: relies_on, label: ids in pasted summaries}
+
+flows:
+  - id: flow-authoring-loop
+    label: Author a map with an agent
+    summary: From an unmapped repository to a validated map.
+    evidence: observed
+    steps:
+      - {id: init, node: first-run, label: Developer runs init and copies the prompt}
+      - {id: guide, node: authoring-guide, label: Agent reads the guide that matches the installed version, via: agent-reads-guide}
+      - {id: write, node: map-file, label: "Agent writes nodes, relationships, flows and refs", via: agent-writes-map}
+      - {id: validate, node: check-integrity, label: validate parses and checks integrity, via: analysis-validates}
+      - {id: resolve, node: resolve-ref, label: Every ref is resolved against the working tree, via: analysis-resolves}
+      - {id: errors, node: diagnostics, kind: failure, after: resolve, label: "Errors: agent repairs using hints and re-runs", via: agent-runs-validate}
+      - {id: done, node: analysis, label: Clean result; the viewer can open it}
+
+  - id: flow-open-and-zoom
+    label: Open the map and zoom to code
+    summary: What happens between `repoluma serve` and readable source inside the map.
+    evidence: observed
+    steps:
+      - {id: serve, node: request-guard, label: serve binds loopback and creates the page token}
+      - {id: bootstrap, node: http-api, label: Page requests /api/bootstrap with the token}
+      - {id: analyze, node: analysis, label: Map validated and refs resolved once, via: api-serves-analysis}
+      - {id: layout, node: layout, label: Browser computes the nested layout, via: layout-consumes-api}
+      - {id: zoom, node: camera, label: Wheel zooms around the pointer, via: developer-explores}
+      - {id: lod, node: draw-lod, label: Details become readable as boxes grow, via: lod-uses-camera}
+      - {id: pane, node: code-panes, label: Code panes turn into real text, via: panes-placed-by-lod}
+      - {id: fetch, node: source-cache, label: Visible excerpts are fetched, via: panes-fetch}
+      - {id: refused, node: confinement, kind: failure, after: fetch, label: "Unreferenced, excluded or escaping paths are refused", via: api-source-confined}
+
+  - id: flow-refresh
+    label: Refresh after a source change
+    summary: Editing a referenced file or the map updates the open page without a restart.
+    evidence: observed
+    steps:
+      - {id: poll, node: http-api, label: Page polls /api/status every 1.5 s}
+      - {id: detect, node: change-detection, label: Stat tokens of the map and referenced files changed}
+      - {id: reanalyze, node: analysis, label: Map re-validated and refs re-resolved, via: change-detection-reanalyzes}
+      - {id: missing, node: diagnostics, kind: failure, after: reanalyze, label: "Symbol renamed: shown as missing, never retargeted"}
+      - {id: relayout, node: layout, label: Layout rebuilt; camera anchored on the selection, via: layout-consumes-api}
+      - {id: refetch, node: source-cache, label: Excerpts of changed files invalidated and refetched, via: cache-requests-source}

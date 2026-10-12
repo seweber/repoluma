@@ -1,0 +1,55 @@
+{
+  "name": "repoluma",
+
+  "build": {
+    "context": "..",
+    "dockerfile": "Dockerfile"
+  },
+
+  "runArgs": [
+    "--userns=keep-id:uid=1000,gid=1000",
+    "--security-opt=no-new-privileges",
+    "--security-opt=label=disable"
+  ],
+
+  "containerUser": "vscode",
+  "remoteUser": "vscode",
+  "updateRemoteUserUID": false,
+
+  "mounts": [
+    "source=repoluma-user-state-${devcontainerId},target=/home/vscode/.persist,type=volume"
+  ],
+
+  "containerEnv": {
+    "CLAUDE_CONFIG_DIR": "/home/vscode/.persist/claude",
+    "HISTFILE": "/home/vscode/.persist/bash_history",
+    "UV_PROJECT_ENVIRONMENT": "/home/vscode/.venv",
+    "UV_CACHE_DIR": "/home/vscode/.persist/uv-cache",
+    "UV_LINK_MODE": "copy",
+    "VIRTUAL_ENV": "/home/vscode/.venv"
+  },
+
+  "postCreateCommand": "bash .devcontainer/post-create.sh",
+
+  "shutdownAction": "none",
+
+  "customizations": {
+    "vscode": {
+      "extensions": [
+        "ms-python.python",
+        "charliermarsh.ruff",
+        "astral-sh.ty",
+        "anthropic.claude-code"
+      ],
+      "settings": {
+        "python.defaultInterpreterPath": "/home/vscode/.venv/bin/python",
+        "python.languageServer": "None",
+         "python.terminal.activateEnvironment": false,
+
+        "[python]": {
+          "editor.defaultFormatter": "charliermarsh.ruff"
+        }
+      }
+    }
+  }
+}
