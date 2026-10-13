@@ -33,22 +33,39 @@ executes or imports the repository it shows.
 
 ## Quick start
 
+repoluma is not on PyPI; install it from this (private) Git repository. uv clones it with
+your normal Git credentials, so anyone with read access can install it:
+
+```sh
+uv tool install git+ssh://git@github.com/seweber/repoluma.git   # SSH key
+# or: uv tool install git+https://github.com/seweber/repoluma.git  (HTTPS; uses your Git
+#     credential helper, e.g. after `gh auth login`)
+```
+
+This puts `repoluma` on your `PATH`. Pin a version with `...repoluma.git@<ref>` (any tag,
+branch, or commit), and update with `uv tool upgrade repoluma`.
+
 ```sh
 cd your-repository
-uvx repoluma init        # creates .repoluma/map.yaml (placeholder) and prints a prompt
-# give the printed prompt to your coding agent; it runs `uvx repoluma guide` and `validate`
-uvx repoluma serve       # opens the viewer on http://127.0.0.1:<port>/
+repoluma init        # creates .repoluma/map.yaml (placeholder) and prints a prompt
+# give the printed prompt to your coding agent; it runs `repoluma guide` and `validate`
+repoluma serve       # opens the viewer on http://127.0.0.1:<port>/
 ```
 
 `serve` works before a map exists: the page explains the next step and loads the map as
 soon as the agent writes a valid one. Edits to the map or to referenced files appear in
 the open page within about two seconds.
 
-Want to look first? `uvx repoluma example ./repoluma-example && uvx repoluma serve --root ./repoluma-example`
+Want to look first? `repoluma example ./repoluma-example && repoluma serve --root ./repoluma-example`
 opens a small fictional shop with a complete map.
 
-> `uvx repoluma` assumes a published release. Before that, use a checkout:
-> `uvx --from /path/to/repoluma repoluma serve` (or see [development](docs/development.md)).
+> **Without installing:** `uvx` works with Git repositories too, via `--from`:
+> `uvx --from git+ssh://git@github.com/seweber/repoluma.git repoluma serve`.
+> Plain `uvx repoluma` does *not* work, because it looks the name up on PyPI. Since the
+> prompt printed by `init` tells your agent which command to run, set it explicitly in
+> that case: `REPOLUMA_CMD="uvx --from git+ssh://git@github.com/seweber/repoluma.git repoluma"`.
+> From a local checkout, use `uvx --from /path/to/repoluma repoluma ...` (or see
+> [development](docs/development.md)).
 
 ## Commands
 
