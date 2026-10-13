@@ -1,6 +1,6 @@
 // Source fetching (bounded, cached, cancellable) and in-map DOM code panes.
 
-import { PANE_HEAD, PANE_LINE } from "./layout.js";
+import { PANE_HEAD, PANE_LINE, restRows } from "./layout.js";
 import { languageOf, tokenize } from "./highlight.js";
 import { clear, copyText, el } from "./util.js";
 
@@ -138,24 +138,32 @@ export class PaneLayer {
       lines: "≈ line range only",
       moved: "⚠ moved: stated lines outdated",
       file: "whole file",
+      rest: pane.nodeId === "~unmapped" ? "⚠ no owner yet" : "⚠ not yet explained",
     }[status] || status;
-    const range = pane.res.start ? `L${pane.res.start}–${pane.res.end}` : "";
+    const codeLines = pane.rest ? pane.segments.filter((g) => g.kind === "code").reduce((a, g) => a + g.end - g.start + 1, 0) : 0;
+    const range = pane.rest ? `${codeLines} of ${pane.res.total_lines} lines` :
+      pane.res.start ? `L${pane.res.start}–${pane.res.end}` : "";
     const changed = pane.res.changed_since_review ? el("span", { class: "pill warn",
       title: "This file changed since the map was last reviewed; the description may be stale",
       text: "changed since review" }) : null;
     const copyBtn = el("button", { class: "pane-btn", title: "Copy the referenced lines",
       text: "copy" });
-    const root = el("div", { class: "pane", dataset: { pane: pane.id } },
-      el("div", { class: "pane-head" },
-        el("span", { class: "pane-path", title: pane.ref.key }, pane.ref.path,
-          pane.ref.symbol ? el("span", { class: "pane-sym", text: " # " + pane.ref.symbol }) : null),
+    const fileBtn = el("button", { class: "pane-btn", title: `Show all of ${pane.ref.path} and where each line is shown`,
+      text: "whole file" });
+    // the caption above the pane (drawn on the map) names the file; the head says how it was found
+    const root = el("div", { class: pane.rest ? "pane unexplained" : "pane", dataset: { pane: pane.id } },
+      el("div", { class: "pane-head", title: pane.ref.key },
         el("span", { class: "pane-meta" },
           pane.ref.role ? el("span", { class: "pill", text: pane.ref.role }) : null,
           changed,
           el("span", { class: `pill st-${status}`, title: pane.res.message, text: statusText }),
-          el("span", { class: "pane-range", text: range }),
-          copyBtn)),
+          el("span", { class: "pane-range", text: range })),
+        el("span", { class: "pane-actions" }, fileBtn, copyBtn)),
       el("div", { class: "pane-body", tabindex: "-1" }));
+    fileBtn.addEventListener("click", (ev) => {
+      ev.stopPropagation();
+      this.app.selectFile(pane.ref.path, pane.res.start);
+    });
     root.style.width = pane.w + "px";
     root.style.height = pane.h + "px";
     const body = root.querySelector(".pane-body");
@@ -164,10 +172,12 @@ export class PaneLayer {
       ev.stopPropagation();
       const data = this.app.sources.peek(pane);
       if (!data || data.error) return;
-      const lines = data.lines.slice(pane.res.start - data.start, pane.res.end - data.start + 1);
+      const lines = pane.rest ? restRows(pane.segments, data.start, data.end).filter((r) => r.n)
+        .map((r) => data.lines[r.n - data.start]) :
+        data.lines.slice(pane.res.start - data.start, pane.res.end - data.start + 1);
       const ok = await copyText(lines.join("\n"));
-      this.app.toast(ok ? `Copied ${pane.ref.key} (L${pane.res.start}–${pane.res.end})` :
-        "Copy failed");
+      this.app.toast(ok ? (pane.rest ? `Copied ${lines.length} lines of ${pane.ref.path}` :
+        `Copied ${pane.ref.key} (L${pane.res.start}–${pane.res.end})`) : "Copy failed");
     });
     return { root, body, rendered: null };
   }
@@ -191,13 +201,13 @@ export class PaneLayer {
     const lang = languageOf(pane.ref.path);
     const frag = document.createDocumentFragment();
     const extra = pane.extra || { before: 0, after: 0 };
-    if (data.start > 1) {
+    if (data.start > 1 && !pane.rest) {
       frag.append(el("button", { class: "pane-more", text: `▲ show ${Math.min(20, data.start - 1)} more lines above`,
         onclick: (ev) => { ev.stopPropagation(); pane.extra = { ...extra, before: extra.before + 20 }; this.app.requestRender(); } }));
     }
     const lineEl = (i) => {
       const n = data.start + i;
-      const inRange = n >= pane.res.start && n <= pane.res.end;
+      const inRange = !pane.rest && n >= pane.res.start && n <= pane.res.end;
       const code = el("span", { class: "tx" });
       for (const [cls, t] of tokenize(data.lines[i], lang)) {
         if (cls) code.append(el("span", { class: "t" + cls, text: t }));
@@ -205,25 +215,32 @@ export class PaneLayer {
       }
       return el("div", { class: inRange ? "ln in" : "ln" }, el("span", { class: "no", text: String(n) }), code);
     };
+    // a rest-of-file pane folds what panes in its area show; other panes show one range
+    const rows = pane.rest ? restRows(pane.segments, data.start, data.end) :
+      data.lines.map((_, i) => ({ n: data.start + i }));
+    const rowEl = (r) => (r.fold ? this.foldEl(pane, r.fold) : lineEl(r.n - data.start));
     const lines = el("div", { class: "lines" });
-    let done = Math.min(LINE_CHUNK, data.lines.length);
-    for (let i = 0; i < done; i++) lines.append(lineEl(i));
+    let done = Math.min(LINE_CHUNK, rows.length);
+    for (let i = 0; i < done; i++) lines.append(rowEl(rows[i]));
     frag.append(lines);
-    const more = data.end < data.total_lines ? el("button", { class: "pane-more",
+    const more = data.end < data.total_lines && !pane.rest ? el("button", { class: "pane-more",
       text: `▼ show ${Math.min(20, data.total_lines - data.end)} more lines below (file has ${data.total_lines})`,
       onclick: (ev) => { ev.stopPropagation(); pane.extra = { ...extra, after: extra.after + 20 }; this.app.requestRender(); } }) : null;
-    if (more) more.hidden = done < data.lines.length;
+    if (more) more.hidden = done < rows.length;
     if (more) frag.append(more);
-    if (done < data.lines.length) {
+    if (pane.rest && data.end < data.total_lines) {
+      frag.append(el("div", { class: "pane-msg", text: `Lines after ${data.end} are not shown here (file has ${data.total_lines}).` }));
+    }
+    if (done < rows.length) {
       // long excerpts: append further lines only when the reader scrolls toward them
       const onScroll = () => {
         if (body.scrollTop + body.clientHeight < body.scrollHeight - 300) return;
-        const stop = Math.min(done + LINE_CHUNK, data.lines.length);
+        const stop = Math.min(done + LINE_CHUNK, rows.length);
         const chunk = document.createDocumentFragment();
-        for (let i = done; i < stop; i++) chunk.append(lineEl(i));
+        for (let i = done; i < stop; i++) chunk.append(rowEl(rows[i]));
         lines.append(chunk);
         done = stop;
-        if (done >= data.lines.length) {
+        if (done >= rows.length) {
           body.removeEventListener("scroll", onScroll);
           if (more) more.hidden = false;
         }
@@ -237,6 +254,32 @@ export class PaneLayer {
       body.scrollTop = 0;
     }
     rec.rendered = data.token + data.start + ":" + data.end;
+  }
+
+  /** One row standing for lines shown elsewhere: where, with links to those panes. */
+  foldEl(pane, segs) {
+    const app = this.app;
+    const a = segs[0].start, b = segs[segs.length - 1].end;
+    const label = (id) => app.nodeById.get(id)?.label || id;
+    const links = [];
+    const seen = new Set();
+    for (const g of segs) {
+      const key = g.kind + (g.node || ""); // each node once (it may cite several parts)
+      if (seen.has(key)) continue;
+      seen.add(key);
+      const go = g.kind === "shown" ? () => app.flyToRef(g.node, g.ref) :
+        g.node ? () => (app.layout.panes.has(`${g.node}::${pane.ref.path}#~rest`) ?
+          app.flyToRef(g.node, `${pane.ref.path}#~rest`) : app.flyToNode(g.node)) : null;
+      const text = g.kind === "shown" ? label(g.node) : g.kind === "glue" ? "imports and comments" :
+        g.node ? `${label(g.node)} (another area)` : "no owner";
+      links.push(go ? el("button", { class: "fold-link", onclick: (ev) => { ev.stopPropagation(); go(); } }, text) :
+        el("span", { text }));
+    }
+    const what = segs.every((g) => g.kind === "shown") ? "shown in" : segs.every((g) => g.kind === "glue") ? ":" : "in";
+    return el("div", { class: "ln fold", title: `lines ${a}–${b}` },
+      el("span", { class: "no", text: "⋯" }),
+      el("span", { class: "tx" }, `${a === b ? `line ${a}` : `lines ${a}–${b}`}${what === ":" ? ":" : " " + what} `,
+        links.flatMap((l, i) => (i ? [", ", l] : [l]))));
   }
 
   paneAt(target) {

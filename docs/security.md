@@ -14,7 +14,9 @@ with symlinks and must remain inside the root. Default exclusions cover VCS
 directories, dependency and cache directories, `.env*`, private keys and certificates,
 credential files, and databases; maps can add `source.exclude` globs. Binary files
 (NUL bytes) and files over 2 MB are refused. The server only serves files that the map
-references, at most 2,000 lines per request.
+references or owns (`owns`), plus code files that still need an owner (so the viewer can
+show them as "not yet mapped"), at most 2,000 lines per request. Excluded files are never
+listed, owned or served.
 
 **The server is local and guarded.** It binds `127.0.0.1` by default (`--host` is an
 explicit opt-in with a warning). Every request must carry a `Host` header naming the
@@ -27,7 +29,7 @@ the served page carries; requests with a foreign `Origin` are refused; only `GET
 labels, summaries and source never pass through `innerHTML`. Canvas text is inert.
 YAML is parsed with a safe loader that cannot construct Python objects.
 
-Tests: `tests/test_server.py` (host, token, origin, method, traversal, referenced-only
-source), `tests/test_sources.py` (confinement, symlinks, exclusions, binary, size),
+Tests: `tests/test_server.py` (host, token, origin, method, traversal, only referenced
+or owned source), `tests/test_sources.py` (confinement, symlinks, exclusions, binary, size),
 `tests/test_freshness.py` (git configuration cannot execute), `tests/test_model.py`
 (YAML object construction refused).

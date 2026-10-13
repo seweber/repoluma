@@ -18,18 +18,29 @@ scope:
     - Benchmark scripts beyond their entry points
     - CSS styling details
 
+source:
+  ownership:
+    # need no place on this map: the example has its own map, benchmarks are development tools
+    ignore: [src/repoluma/examples/**, bench/**]
+
 nodes:
   # ------------------------------------------------------------------ authoring
   - id: describe
     kind: capability
-    label: Describe a repository
+    label: Map authoring
     summary: A coding agent writes the map; repoluma supplies the format, instructions and a safe first run.
+    owns:
+      - src/repoluma/cli.py   # commands that serve other capabilities are split off below
+      - src/repoluma/__main__.py
+      - src/repoluma/__init__.py
+      - src/repoluma/guide/AUTHORING.md
+      - src/repoluma/model.py#json_schema
     details: No model provider is embedded. The installed package prints its own guide so instructions always match the schema version.
 
   - id: first-run
     parent: describe
     kind: responsibility
-    label: First run
+    label: Create starter map
     summary: "`repoluma init` creates a placeholder map without overwriting anything and prints a prompt to hand to an agent."
     evidence: observed
     refs:
@@ -44,7 +55,7 @@ nodes:
   - id: authoring-guide
     parent: describe
     kind: responsibility
-    label: Authoring guide
+    label: Instruct coding agents
     summary: Teaches agents to describe purpose before structure, attach evidence and report gaps; exportable as a skill file on request.
     evidence: observed
     refs:
@@ -57,7 +68,7 @@ nodes:
   - id: map-format
     parent: describe
     kind: contract
-    label: Map format v2
+    label: Map file format
     summary: YAML with nodes (containment tree), relationships typed as data, control or dependency (arrows always from → to), flows with failure branches, and source references.
     contract:
       inputs: [YAML document with schema_version 2 (version 1 is converted)]
@@ -81,17 +92,33 @@ nodes:
       - path: tests/test_model.py
         symbol: test_schema_version_1_relationships_are_converted
         role: test
+      - path: src/repoluma/__init__.py
 
   # ----------------------------------------------------------------- validation
+  - id: cli
+    parent: describe
+    kind: component
+    label: Command-line interface
+    summary: The repoluma command. Argument parsing and the entry point; the code of each subcommand is shown with the capability it serves.
+    evidence: observed
+    refs:
+      - path: src/repoluma/cli.py
+        symbol: build_parser
+      - path: src/repoluma/cli.py
+      - path: src/repoluma/__main__.py
+
   - id: validate
     kind: capability
-    label: Validate a map
+    label: Map validation
     summary: Turns a possibly broken map into diagnostics an agent can act on, plus a best-effort model the viewer can still show.
+    owns:
+      - src/repoluma/model.py
+      - src/repoluma/cli.py#cmd_validate
 
   - id: parse-map
     parent: validate
     kind: responsibility
-    label: Parse safely
+    label: Parse map YAML
     summary: Safe YAML loading that remembers line numbers for every record; no Python objects can be constructed.
     evidence: observed
     refs:
@@ -103,7 +130,7 @@ nodes:
   - id: check-integrity
     parent: validate
     kind: responsibility
-    label: Check integrity
+    label: Check map structure
     summary: Required fields, id rules, references between records, containment cycles, flow step ordering.
     details: Lenient by design. Broken parents become top level and broken relationships are dropped, each with a diagnostic, so a partial map stays viewable.
     evidence: observed
@@ -113,11 +140,12 @@ nodes:
       - path: tests/test_model.py
         symbol: test_containment_cycle_is_broken_and_reported
         role: test
+      - path: src/repoluma/model.py
 
   - id: diagnostics
     parent: validate
     kind: contract
-    label: Diagnostics
+    label: Diagnostics with repair hints
     summary: Each problem names severity, code, record id, map line and a repair hint; available as text or JSON.
     contract:
       outputs: ["severity, code, message, location, line, record, hint"]
@@ -132,8 +160,11 @@ nodes:
   # ------------------------------------------------------------------- evidence
   - id: evidence
     kind: capability
-    label: Resolve source evidence
+    label: Code reference lookup
     summary: Finds what each reference points to in the working tree, safely, and says how sure that resolution is.
+    owns:
+      - src/repoluma/sources.py
+      - src/repoluma/ownership.py
 
   - id: resolve-ref
     parent: evidence
@@ -154,11 +185,12 @@ nodes:
       - path: tests/test_sources.py
         symbol: test_python_never_resolves_to_a_different_symbol
         role: test
+      - path: src/repoluma/sources.py
 
   - id: python-symbols
     parent: evidence
     kind: responsibility
-    label: Python symbols
+    label: Index Python symbols
     summary: Indexes qualified names of classes, functions and module constants with ast.parse (parsing only, no import).
     evidence: observed
     refs:
@@ -168,7 +200,7 @@ nodes:
   - id: text-heuristics
     parent: evidence
     kind: responsibility
-    label: Other languages
+    label: Match non-Python definitions
     summary: Definition-like text patterns plus brace or indentation matching; Markdown headings; TOML tables. Disclosed as approximate.
     evidence: observed
     refs:
@@ -181,7 +213,7 @@ nodes:
   - id: confinement
     parent: evidence
     kind: rule
-    label: Source confinement
+    label: Repository files only
     summary: Only regular files inside the root after symlink resolution, never excluded files (secrets, VCS, caches), never binary or huge files.
     evidence: observed
     refs:
@@ -196,7 +228,7 @@ nodes:
   - id: freshness
     parent: evidence
     kind: responsibility
-    label: Freshness and staleness
+    label: Report changes since review
     summary: Reports HEAD, uncommitted files, and which referenced files changed since the map's reviewed revision.
     details: Git runs read-only with hooks and fsmonitor disabled, so viewing a repository cannot execute its configuration.
     evidence: observed
@@ -212,17 +244,36 @@ nodes:
   - id: coverage
     parent: evidence
     kind: responsibility
-    label: Coverage summary
-    summary: Per-directory counts of files the map references, an honest signal of unmodeled areas.
+    label: Count unmapped files
+    summary: Per-directory counts of code files that have an owner, an honest signal of unmapped areas.
     evidence: observed
     refs:
       - path: src/repoluma/sources.py
         symbol: coverage
 
+  - id: ownership
+    parent: evidence
+    kind: responsibility
+    label: Assign files to areas
+    summary: Gives every code file exactly one owning area from the top-level nodes' owns patterns, decides which pane shows each line, and reports files without an owner.
+    details: The most specific pattern wins (an exact path beats a glob); path#Symbol gives part of a file to another area. Every line of code must be shown by a node of its area (glue such as imports and comments excepted); code no node shows is an error and is flagged in the viewer. Tests, docs and tooling need no owner.
+    evidence: observed
+    refs:
+      - path: src/repoluma/ownership.py
+        symbol: compute_ownership
+      - path: src/repoluma/ownership.py
+        symbol: specificity
+      - path: src/repoluma/ownership.py
+        symbol: rest_of_files
+      - path: tests/test_ownership.py
+        symbol: test_the_most_specific_pattern_wins
+        role: test
+      - path: src/repoluma/ownership.py
+
   - id: working-tree
     parent: evidence
     kind: resource
-    label: Working tree
+    label: Working tree files
     summary: The repository's files as they are now, including uncommitted edits. The single source of displayed code.
     evidence: observed
     refs:
@@ -232,18 +283,23 @@ nodes:
   # --------------------------------------------------------------------- server
   - id: serve
     kind: capability
-    label: Serve the viewer
+    label: Local map server
     summary: A standard-library HTTP server on loopback that hands the browser the analyzed map and bounded source excerpts.
+    owns:
+      - src/repoluma/workspace.py
+      - src/repoluma/server.py
+      - src/repoluma/cli.py#cmd_serve
 
   - id: analysis
     parent: serve
     kind: responsibility
-    label: Analyze workspace
+    label: Assemble map analysis
     summary: Validates the map, resolves every reference once, and gathers git and coverage context into one payload.
     evidence: observed
     refs:
       - path: src/repoluma/workspace.py
         symbol: Workspace.analyze
+      - path: src/repoluma/workspace.py
 
   - id: http-api
     parent: serve
@@ -253,10 +309,10 @@ nodes:
     contract:
       inputs:
         - "X-Repoluma-Token header (from the served page)"
-        - "/api/source?path&start&end for a file the map references"
+        - "/api/source?path&start&end for a file the map references or owns"
       outputs:
-        - bootstrap = model, diagnostics, ref resolutions, git, coverage
-        - status = digest of map and referenced-file stats
+        - bootstrap = model, diagnostics, ref resolutions, file owners, git, coverage
+        - status = digest of map and referenced-file stats, and of the file list
         - source = bounded line excerpt with a change token
       guarantees: [Read-only, at most 2000 lines per excerpt]
       errors: [403 wrong Host, Origin or token; 405 non-GET; error field for unservable files]
@@ -265,13 +321,16 @@ nodes:
       - path: src/repoluma/server.py
         symbol: make_handler
       - path: tests/test_server.py
-        symbol: test_source_endpoint_serves_only_referenced_files
+        symbol: test_source_endpoint_serves_only_referenced_or_owned_files
         role: test
+      - path: src/repoluma/server.py
+      - path: src/repoluma/cli.py
+        symbol: cmd_serve
 
   - id: request-guard
     parent: serve
     kind: rule
-    label: Local-only access
+    label: Loopback and token only
     summary: Loopback by default, Host allow-list against DNS rebinding, per-process token, cross-origin refusal, strict CSP.
     evidence: observed
     refs:
@@ -284,7 +343,7 @@ nodes:
   - id: change-detection
     parent: serve
     kind: responsibility
-    label: Change detection
+    label: Reanalyze on file changes
     summary: Caches the analysis and recomputes it when the map or a referenced file changes (stat tokens), so polling is cheap.
     evidence: observed
     refs:
@@ -294,24 +353,28 @@ nodes:
   # --------------------------------------------------------------------- viewer
   - id: navigate
     kind: capability
-    label: Navigate meaning
+    label: Zoomable map
     summary: One zoomable map in the browser; detail appears as things get larger, consistently everywhere.
+    owns:
+      - src/repoluma/web/   # the page, styles, app shell (main.js) and shared helpers (util.js)
+      - src/repoluma/model.py#_link_steps
 
   - id: layout
     parent: navigate
     kind: responsibility
-    label: Nested layout
+    label: Size and nest regions
     summary: Sizes regions bottom-up and places them top-down at a constant scale step, so every node at the same depth has the same on-screen size at any zoom.
     details: Geometry depends only on the map, never on zoom, filters or selection, so the map does not rearrange while navigating.
     evidence: observed
     refs:
       - path: src/repoluma/web/js/layout.js
         symbol: computeLayout
+      - path: src/repoluma/web/js/layout.js
 
   - id: arrange
     parent: navigate
     kind: responsibility
-    label: Connection-driven placement
+    label: Place connected items together
     summary: Places the items of each region so connected items sit close and items talking to other regions sit on the side facing them.
     details: Stress majorization gives neutral positions, an optimal assignment snaps them to a grid, and local swaps shorten routes and avoid bends. Maps up to 1,500 nodes try several variants per region and keep the one that routes best. Last, an item smaller than its grid cell moves within it to where its lines run straight.
     evidence: observed
@@ -322,11 +385,12 @@ nodes:
         symbol: stress
       - path: src/repoluma/web/js/layout.js
         symbol: bestArrangement
+      - path: src/repoluma/web/js/arrange.js
 
   - id: constant-scale
     parent: navigate
     kind: rule
-    label: One scale everywhere
+    label: Equal size at equal depth
     summary: The child scale step K is global; panning at a fixed zoom shows comparable detail in every region.
     evidence: observed
     refs:
@@ -338,7 +402,7 @@ nodes:
   - id: camera
     parent: navigate
     kind: component
-    label: Camera
+    label: Zoom and pan camera
     summary: Pointer-anchored zoom, panning, and smooth fly-to (van Wijk and Nuij) that zooms out before travelling far.
     evidence: observed
     refs:
@@ -346,21 +410,23 @@ nodes:
         symbol: Camera.flyTo
       - path: src/repoluma/web/js/camera.js
         symbol: interpolateZoom
+      - path: src/repoluma/web/js/camera.js
 
   - id: draw-lod
     parent: navigate
     kind: responsibility
-    label: Level of detail
+    label: Draw detail by zoom level
     summary: Draws only what is in view; text becomes readable, greeked, or an overview label depending on its projected size.
     evidence: observed
     refs:
       - path: src/repoluma/web/js/render.js
         symbol: Renderer.drawNode
+      - path: src/repoluma/web/js/render.js
 
   - id: route-lines
     parent: navigate
     kind: responsibility
-    label: Orthogonal routing
+    label: Route connection lines
     summary: Connects boxes with horizontal and vertical lines that avoid everything drawn, deciding the inside of nested regions before where a line crosses their borders.
     details: A line may touch a box anywhere along a side. For each end, the ways out of every enclosing region are computed from the inside out (straight and L-shaped ways keep a range of border positions, split and priced by the placed lines they would cross), and the region containing both ends picks the cheapest combination of a straight, L or Z line. Spots on box sides and borders are claimed so lines keep their spacing; finally, parallel pieces that run alongside each other are ordered by where they turn off and moved apart as little as needed. Only connections with identical endpoints share a line; flows add no lines of their own.
     evidence: observed
@@ -375,11 +441,12 @@ nodes:
         symbol: Level.separate
       - path: src/repoluma/web/js/render.js
         symbol: Renderer.drawSegments
+      - path: src/repoluma/web/js/route.js
 
   - id: flow-overlay
     parent: navigate
     kind: responsibility
-    label: Follow a flow
+    label: Show flow steps
     summary: Shows a flow's numbered steps on the relationships they use, with dashed failure and compensation branches, and a step bar on the map to go back, forward or close.
     details: The validator resolves which relationship each step is drawn on (its `via`, or one from where the flow is to this step's node) and warns when there is none, so a flow never shows a connection the map does not have. It also warns when a step jumps over nodes the flow passes through, since only the steps' nodes and the ends of their relationships stay bright.
     evidence: observed
@@ -396,7 +463,7 @@ nodes:
   - id: panels
     parent: navigate
     kind: component
-    label: Inspector and panels
+    label: Inspector and side panels
     summary: Outline (keyboard-accessible tree), flows, layers, coverage, and an inspector with contract, evidence and relationships.
     evidence: observed
     refs:
@@ -404,11 +471,12 @@ nodes:
         symbol: renderInspector
       - path: src/repoluma/web/js/ui.js
         symbol: renderCoverage
+      - path: src/repoluma/web/js/ui.js
 
   - id: filters
     parent: navigate
     kind: responsibility
-    label: Layers and filters
+    label: "Filter lines, kinds and tags"
     summary: Hide relationship types (data, control, dependency), node kinds or tags; hidden nodes keep their place as outlines and hidden counts stay visible. A legend on the map says what each line type and arrow means.
     evidence: observed
     refs:
@@ -420,15 +488,48 @@ nodes:
         symbol: renderMapLegend
 
   # ---------------------------------------------------------------- source panes
+  - id: app-shell
+    parent: navigate
+    kind: component
+    label: Viewer state and input
+    summary: Loads the analysis, holds the selection, view, filters and URL state, and handles input, search and live refresh.
+    evidence: observed
+    refs:
+      - path: src/repoluma/web/js/main.js
+
+  - id: page-and-styles
+    parent: navigate
+    kind: component
+    label: Viewer page and styles
+    summary: The single HTML page (panels, controls, help) and its stylesheet with light and dark themes.
+    evidence: observed
+    refs:
+      - path: src/repoluma/web/index.html
+      - path: src/repoluma/web/app.css
+
+  - id: shared-helpers
+    parent: navigate
+    kind: component
+    label: DOM and math helpers
+    summary: Small DOM and math helpers used across the viewer; map and source text reaches the DOM only as text.
+    evidence: observed
+    refs:
+      - path: src/repoluma/web/js/util.js
+
   - id: inspect-source
     kind: capability
-    label: Inspect source in the map
+    label: Code in the map
     summary: Referenced code appears inside its node as a bounded, scrollable, selectable pane read live from the server.
+    owns:
+      - src/repoluma/web/js/panes.js
+      - src/repoluma/web/js/highlight.js
+      - src/repoluma/web/js/files.js
+      - src/repoluma/cli.py#cmd_where
 
   - id: code-panes
     parent: inspect-source
     kind: component
-    label: Code panes
+    label: Source code panes
     summary: DOM panes positioned with the camera transform once their text is large enough; inactive panes forward wheel and drag to the map.
     details: Click activates a pane (wheel scrolls code, text is selectable); Esc releases it. Context lines can be expanded.
     evidence: observed
@@ -437,11 +538,12 @@ nodes:
         symbol: PaneLayer.update
       - path: src/repoluma/web/js/main.js
         symbol: App.bindEvents
+      - path: src/repoluma/web/js/panes.js
 
   - id: source-cache
     parent: inspect-source
     kind: component
-    label: Source cache
+    label: Code excerpt loader
     summary: Fetches visible excerpts with bounded concurrency, drops requests that scrolled out of view, invalidates changed files.
     evidence: observed
     refs:
@@ -451,23 +553,43 @@ nodes:
   - id: highlight
     parent: inspect-source
     kind: component
-    label: Syntax colouring
+    label: Syntax highlighter
     summary: Approximate line tokenizer that only produces text nodes.
     evidence: observed
     refs:
       - path: src/repoluma/web/js/highlight.js
         symbol: tokenize
+      - path: src/repoluma/web/js/highlight.js
 
   # ------------------------------------------------------------------ discussing
+  - id: file-lookup
+    parent: inspect-source
+    kind: responsibility
+    label: Locate a file's area
+    summary: From a file (or line) to its area and the pane that shows it, and who cites it, in the Files tab, the file view and `repoluma where`.
+    evidence: observed
+    refs:
+      - path: src/repoluma/web/js/files.js
+        symbol: FileIndex.ownerAt
+      - path: src/repoluma/web/js/ui.js
+        symbol: renderFiles
+      - path: src/repoluma/cli.py
+        symbol: cmd_where
+      - path: src/repoluma/web/js/files.js
+
   - id: discuss
     kind: capability
-    label: Discuss with an agent
+    label: Agent handoff
     summary: Stable ids, links that restore the exact view, and copyable selection summaries make it easy to point an agent at a region.
+    owns:
+      - src/repoluma/web/js/main.js#App.agentSummary
+      - src/repoluma/web/js/main.js#App.restoreFromHash
+      - src/repoluma/web/js/ui.js#computeImpact
 
   - id: agent-summary
     parent: discuss
     kind: responsibility
-    label: Copy for agent
+    label: Copy summary for agent
     summary: Text with ids, containment path, contract, resolved source ranges, relationships, review candidates and a view link.
     evidence: observed
     refs:
@@ -477,7 +599,7 @@ nodes:
   - id: view-links
     parent: discuss
     kind: responsibility
-    label: Reproducible view links
+    label: Link to exact view
     summary: The URL fragment carries camera, selection, active flow step and filters.
     evidence: observed
     refs:
@@ -487,7 +609,7 @@ nodes:
   - id: impact
     parent: discuss
     kind: responsibility
-    label: Review candidates
+    label: Trace change impact
     summary: Walks modeled dependency relationships backwards up to three steps and shows the path, with a coverage disclaimer.
     evidence: observed
     refs:
@@ -497,7 +619,7 @@ nodes:
   - id: change-overlay
     parent: discuss
     kind: responsibility
-    label: Proposed-change overlay
+    label: Sketch proposed changes
     summary: Sketching a proposed change on top of the current map, kept visibly separate from implemented behavior.
     evidence: planned
 
@@ -538,9 +660,13 @@ relationships:
   - {id: freshness-reads-tree, from: working-tree, to: freshness, type: data, label: git status and diff, evidence: observed}
   - {id: analysis-freshness, from: freshness, to: analysis, type: data, label: files changed since review, evidence: observed}
   - {id: analysis-coverage, from: coverage, to: analysis, type: data, label: coverage per directory, evidence: observed}
+  - {id: ownership-lists-files, from: working-tree, to: ownership, type: data, label: file list, evidence: observed}
+  - {id: analysis-ownership, from: ownership, to: analysis, type: data, label: owner of every file, evidence: observed}
+  - {id: lookup-uses-api, from: http-api, to: file-lookup, type: data, label: owners and whole files, evidence: observed}
   - {id: validate-command-analyzes, from: analysis, to: diagnostics, type: data, label: diagnostics (same analysis as the viewer), evidence: observed}
   - {id: api-serves-analysis, from: analysis, to: http-api, type: data, label: "model, resolutions, diagnostics", evidence: observed}
   - {id: api-uses-analysis, from: change-detection, to: http-api, type: data, label: status digest, evidence: observed}
+  - {id: shell-loads, from: http-api, to: app-shell, type: data, label: analysis and status digest, evidence: observed}
   - {id: layout-consumes-api, from: http-api, to: layout, type: data, label: bootstrap (model and resolutions), evidence: observed}
   - {id: layout-arranges, from: arrange, to: layout, type: data, label: positions per region, evidence: observed}
   - {id: layout-routes, from: route-lines, to: layout, type: data, label: line routes, evidence: observed}
@@ -565,7 +691,7 @@ relationships:
   - {id: integrity-enforces-format, from: check-integrity, to: map-format, type: dependency, kind: enforces, evidence: observed}
   - {id: resolve-confined, from: resolve-ref, to: confinement, type: dependency, kind: relies_on, evidence: observed}
   - {id: api-guarded, from: http-api, to: request-guard, type: dependency, kind: enforces, evidence: observed}
-  - {id: api-source-confined, from: http-api, to: confinement, type: dependency, kind: relies_on, label: referenced files only, evidence: observed}
+  - {id: api-source-confined, from: http-api, to: confinement, type: dependency, kind: relies_on, label: referenced or owned files only, evidence: observed}
   - {id: layout-constant-scale, from: layout, to: constant-scale, type: dependency, kind: enforces, evidence: observed}
   - {id: flows-use-routes, from: flow-overlay, to: route-lines, type: dependency, kind: depends_on, label: steps drawn on relationship lines, evidence: observed}
   - {id: filters-affect-lines, from: route-lines, to: filters, type: dependency, kind: relies_on, label: hidden relationship types, evidence: observed}

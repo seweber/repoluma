@@ -30,10 +30,11 @@ const QS = 1e4; // quantization steps per unit
 export const quant = (v) => Math.round(v * QS) / QS;
 const EPS = 1e-6;
 const SATURATED = 400; // lines in one region beyond which crossings are no longer priced
+const PORT_SEP = 1.6; // spacing of line ends on a box side, relative to sep
 const BUSY = 100; // lines in one region beyond which ways out are not split by the lines they cross
 
 /** Distance kept from a box's corners when a line attaches to its side. */
-export const sideInset = (len, gap) => Math.min(len * 0.2, gap * 0.3);
+export const sideInset = (len, gap) => Math.min(len * 0.2, gap * 0.5); // lines keep away from corners
 
 const horizontal = (O) => O.dir[0] !== 0; // a line leaving O starts horizontally
 const alongOf = (O, p) => (horizontal(O) ? p[1] : p[0]);
@@ -784,7 +785,9 @@ class Claims {
     const key = (opts.length === 1 ? this.optKey(opts[0]) : opts.map((O) => this.optKey(O)).join("/")) + `@${lo},${hi}`;
     const hit = this.cache.get(key);
     if (hit) return hit;
-    const sep = opts[0].level.sep; // all options of one connection belong to one level
+    // all options of one connection belong to one level; line ends on a box keep more
+    // room than lines in a channel, so that their arrowheads stay apart
+    const sep = opts[0].level.sep * (opts.some((O) => O.item !== undefined) ? PORT_SEP : 1);
     const taken = [];
     for (const O of opts) {
       // claims are kept sorted in world units: look only at the window around the range

@@ -26,11 +26,14 @@ code display, and reference checking.
    what is shared.
 4. **Attach evidence.** Give leaf nodes `refs` to the code (and tests) that support
    them. Mark how sure you are with `evidence`.
-5. **Validate and repair**: run `repoluma validate` and fix every error. Use
+5. **Give every code file a home, and every line of code a node.** With `owns` on the
+   top-level nodes, each code file belongs to exactly one area; inside the area, every
+   line of code must be shown by some node's `refs` (see "Ownership" below).
+6. **Validate and repair**: run `repoluma validate` and fix every error. Use
    `repoluma validate --json` for machine-readable diagnostics. Treat warnings as
    likely mistakes (typos in field names, unknown kinds, outdated line hints).
-6. **Look at it** if you can: `repoluma serve` prints a local URL.
-7. **Report** to the user: what the map covers, what it omits (also record that in
+7. **Look at it** if you can: `repoluma serve` prints a local URL.
+8. **Report** to the user: what the map covers, what it omits (also record that in
    `scope.not_covered`), and which claims need review.
 
 ## The format
@@ -52,15 +55,18 @@ scope:
   reviewed_revision: 3f2a1c9   # optional: commit the map was last checked against
 source:
   exclude: [fixtures/large/*]  # optional extra exclusions (secrets are excluded by default)
+  ownership:
+    ignore: [scripts/**]       # optional: code files that need no owner (tests, docs are skipped anyway)
 nodes:
   - id: payments               # stable id: lowercase, digits, . _ - ; never reuse for something else
     kind: capability
     label: Payments
     summary: Holds, collects and returns customer money through an external provider.
+    owns: [shop/payments/]     # top-level nodes only: every file in this folder belongs to this area
   - id: authorize-payment
     parent: payments           # containment: where it lives on the map
     kind: contract
-    label: Authorize payment
+    label: Payment authorization
     summary: Hold funds for an order without collecting them.
     contract:
       inputs: [payment token, positive amount and currency]
@@ -109,7 +115,7 @@ flows:
 | field | meaning |
 | --- | --- |
 | `id` (required) | Stable identifier, unique across nodes, relationships and flows. Keep it when the label changes. |
-| `label` | Short display name in the system's own language. |
+| `label` | Short display name a reader understands on its own; see "Naming boxes". |
 | `kind` | `system`, `domain`, `capability`, `responsibility`, `component`, `contract`, `rule`, `resource`, `data`, `external`, `actor`, `test`, `area`. Pick what helps a reader; `area` is a neutral grouping. |
 | `parent` | Id of the containing node. Omit for top level. Containment must be a tree. |
 | `summary` | One or two sentences: what it does or means (not how the code is laid out). |
@@ -118,6 +124,7 @@ flows:
 | `evidence` | `observed` (you read the code and it does this), `inferred` (interpretation), `needs_review`, `unknown` (known gap), `planned` (not implemented). |
 | `confidence` | Optional `low`/`medium`/`high`; an annotation, not a probability. |
 | `refs` | Source evidence (see below). |
+| `owns` | Top-level nodes only: files that belong to this area: paths, globs, folders (`dir/`) or `path#Symbol` (see "Ownership"). |
 | `tags` | Free labels for filtering, e.g. `infrastructure`, `test`, `legacy`. |
 | `notes` | Caveats, open questions. |
 
@@ -125,7 +132,7 @@ Prefix custom fields with `x-` (they are ignored, not errors).
 
 ### Choosing the hierarchy
 
-- Top level: areas of **purpose** a newcomer would recognize (e.g. "Purchasing",
+- Top level: areas of **purpose** a newcomer would recognize (named as in "Naming boxes"; e.g. "Purchasing",
   "Simulation setup", "Plugin loading"), plus important external systems and actors.
   4–9 top-level nodes reads best; group further if there are more.
 - Below that: responsibilities, contracts, rules, resources. Depth is free: a small
@@ -144,6 +151,40 @@ Prefix custom fields with `x-` (they are ignored, not errors).
   to understanding (payment provider, HTTP library, database). Give them refs only to
   *this repository's* code that touches them (the adapter, the configuration, the
   dependency declaration with `role: config`); never to vendored or installed code.
+
+### Naming boxes (`label`)
+
+Labels are read on boxes, in search results and breadcrumbs, and cut to their first
+words when zoomed out. A good label lets someone who sees **only the label** guess what
+is inside. Choose the concepts first (what is affected, what happens), then the words,
+then the shortest phrase that keeps both.
+
+Form by kind, so siblings read as a list:
+
+| kind | form | good | weak |
+| --- | --- | --- | --- |
+| capability, domain, area, system | noun phrase for what a user or the system gets, in plain words | `Lending`, `Catalogue search`, `Zoomable map` | `Navigate meaning`, `Manage knowledge` |
+| responsibility | verb + specific object (imperative), a strong verb | `Renew loans`, `Trace change impact`, `Reanalyze on file changes` | `Analysis`, `Handle loans`, `Review candidates` |
+| rule | the rule itself, as a short name of the constraint | `Max 5 loans per member`, `Whole-order returns only` | `Loan limits`, `Partial returns` (feature or ban?) |
+| data, resource | what it holds | `Member records`, `Stock levels` | `Store`, `Data` |
+| component, contract, external, actor, test | the thing as people call it, with its role if the name alone is generic | `Card reader interface`, `Syntax highlighter`, `Librarian` | `Shell`, `Helpers`, `Engine` |
+
+- **Specific, never a lone generic noun.** `Analysis`, `Layout`, `Cache`, `Lookup`,
+  `Helpers`, `Core`, `Utilities` say nothing on their own: say of what or for what
+  (`Fine calculation`, `DOM and math helpers`, `Code excerpt loader`).
+- **The reader's words.** What users and maintainers call it; no internal metaphors,
+  slang, abbreviations or code names (unless the box is that public thing).
+- **Readable alone, without repeating the parent.** `Other languages` means nothing in a
+  search result (`Match non-Python definitions` does); inside `Payments`, `Refund payment`
+  is fine but `Payments refund processing` is not needed.
+- **Front-load the distinguishing word**; **no adverbs or qualities** (`safely`, `fast`:
+  put them in the summary); **not a button text** (`Copy for agent` names a click, not a
+  part).
+- **Short:** 1–4 words, about 30 characters; top level 1–3 words. A label that needs more
+  usually describes *how* (move that to the summary) or covers two nodes.
+- **Check the list.** Read all labels as a flat list: can two be confused (`Map
+  validation` / `Check map structure` is fine, `Map validation` / `Check map consistency`
+  was read as "checks against the code")? Can one be read as its opposite? Rename until not.
 
 ### Relationships
 
@@ -242,6 +283,68 @@ How repoluma resolves them (`repoluma validate` reports the result of each):
 Never copy source code into the map. Never reference secrets (`.env`, keys); they are
 excluded and reported as errors.
 
+### Ownership (`owns`)
+
+`refs` say *which code supports a claim*; many nodes may cite the same file. `owns` says
+*which area a file belongs to*: every code file has **exactly one** owner, and owners are
+**top-level nodes** (the areas of the overview). A reader who meets a file in an editor,
+a diff or a stack trace uses this to find its area; the viewer names each area's files on
+its box.
+
+**Every line of code in an owned file must be shown by a node of its area**, through that
+node's `refs`: a symbol (`path#Name`), a whole class, or the whole file (`path` alone).
+Code that no node shows is an error (`unexplained-code`): the map would not say what it
+does. The viewer still shows it, in a dashed "not yet explained" pane in the area, until
+you fix the map. Exempt ("glue"): blank lines, comments, imports, module docstrings,
+`__all__`, an `if __name__ == "__main__"` block, closing brackets, and a class's header
+when one of its members is shown. Code that nothing needs is better deleted.
+
+How to fix `unexplained-code`: cite the code from the node it belongs to (the hint names
+nodes that show code nearby); a new node when it does something no node describes; a
+whole class or file where its parts are not worth separate claims (a module of small
+helpers can be one node "Shared helpers").
+
+```yaml
+  - id: payments                            # a top-level node
+    owns: [shop/payments/]                  # a folder: everything in it...
+  - id: purchasing
+    owns:
+      - shop/payments/checkout_client.py    # ...except what a more specific pattern claims
+      - shop/orders.py
+  - id: shared
+    owns:
+      - shop/money.py
+      - shop/cli.py#serve_command          # part of a file: this symbol belongs here
+```
+
+- `owns` on an inner node is an error (`owns-not-top-level`); it is counted for its area
+  until you move it there.
+- Patterns: an exact path, a folder (`src/app/`), or a glob (`*` within a folder name,
+  `**` across folders, `?`, `[abc]`). They are repository-relative with forward slashes.
+- **The most specific pattern wins**: an exact path beats any glob; among globs, the one
+  with more fixed leading folders wins, then the one with more fixed characters. Two
+  equally specific claims by different areas are an error (`ownership-conflict`).
+- **Which files need an owner**: code files (by extension). Tests, docs, vendored and
+  generated code, and hidden tooling folders (`.github/`, ...) need none; adjust with
+  `source.ownership.ignore` (no owner needed) and `source.ownership.require` (owner
+  needed, e.g. `[docs/**]`). Non-code files (README, configuration) may still be owned.
+- **A file used by many areas** (`utils.py`, `money.py`): give it to an area of its own
+  (named for what it holds, e.g. "Money and date types" or "Text formatting helpers", with a
+  child node per cohesive part that cites it)
+  rather than to the first user. Its users cite it with `refs`; no relationship from
+  every user is needed.
+- **A file that serves several areas** (a command-line module with one function per
+  feature): give the file to the area it mainly belongs to and the parts to the other
+  areas with `path#Symbol`. Parts use the same symbol lookup as `refs`; a part inside
+  another part (`Class.method` inside `Class`) wins over it. The file's owner keeps
+  everything not given away (imports, helpers). Split only where parts clearly belong to
+  another area, not to make files look small.
+- Never give the same file (or part) to two areas. Many nodes citing it is fine.
+- `repoluma validate` reports code files without an owner (`unowned-file`, with a
+  suggested area where `refs` already point at them), patterns that match nothing, and
+  conflicts. `repoluma where path:line` prints a file's area and the pane that shows
+  the line. Non-code files (documents, data) may be owned too; they are shown where cited.
+
 ### Evidence honesty
 
 - `observed` only when you read the referenced code and it does what you claim.
@@ -264,6 +367,8 @@ excluded and reported as errors.
   descriptions against that commit, including on a first map you wrote from reading
   the code. The viewer then flags nodes whose referenced files changed since. Do not
   bump it after merely fixing references.
+- New, moved or renamed files: run `repoluma validate`; files without an owner and
+  patterns that no longer match are reported. Give new files their place in `owns`.
 - Edit only the affected regions; keep the file ordered (parents before children,
   related nodes together) so diffs stay readable.
 
@@ -291,4 +396,10 @@ Severities: `error` (fails validation), `warning` (likely mistake; fails with
 | `ref-excluded` | File is excluded (secrets, generated, `source.exclude`). |
 | `yaml-syntax` | Quote strings containing `: `, commas inside `{...}`, or starting with special characters. |
 | `contract-without-terms` (info) | A `contract` node without `contract:` terms; describe inputs/outputs/guarantees/errors. |
+| `unowned-file` | Code files nobody owns: add them to a node's `owns` (see the suggested owner), or to `source.ownership.ignore`. |
+| `ownership-conflict` | Two nodes claim a file (or part) equally: make one pattern more specific, or drop one claim. |
+| `owns-matches-nothing` | The pattern names no file: fix the path; folders need a trailing `/`. |
+| `owns-not-top-level` | Move the patterns to the top-level node this node is in. |
+| `unexplained-code` | Code in an owned file that no node of its area shows: cite it (symbol, class or whole file) from the node it belongs to, add a node, or delete dead code. |
+| `bad-owns`, `owns-missing-symbol`, `owns-excluded` | Malformed pattern, unknown symbol, or an excluded file in `owns`. |
 | `ref-heuristic`, `ref-lines` (info) | Resolved approximately; check the range in the viewer, prefer a symbol. |

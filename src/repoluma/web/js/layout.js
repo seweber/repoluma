@@ -23,7 +23,9 @@ export const PANE_HEAD = 34;
 export const PANE_LINE = 19;
 export const PANE_MAX_VISIBLE = 30;
 export const PANE_CONTEXT = 3;
-export const PANE_MAX_LINES = 600;
+export const PANE_MAX_LINES = 2000; // the server sends at most this many lines at once
+export const REST_K = K * PANE_K; // rest-of-file panes in an area: the size of its items' panes
+export const REST_MAX_LINES = 2000; // the server sends at most this many lines at once
 const TEXT_MAX_W = 760;
 
 export const SANS = 'system-ui, -apple-system, "Segoe UI", Roboto, "DejaVu Sans", sans-serif';
@@ -38,11 +40,14 @@ export const STYLES = {
   item: { size: 14, lh: 20, weight: 400 },
   note: { size: 14, lh: 20, weight: 400, italic: true },
   warn: { size: 13, lh: 19, weight: 600 },
+  files: { size: 14, lh: 21, weight: 500, mono: true },
+  caption: { size: 15, lh: 20, weight: 500, mono: true },
 };
+export const CAPTION_H = 28; // a code pane's caption (its file) above it, in node units
 
 export const DISPLAYABLE = new Set(["resolved", "heuristic", "lines", "moved", "file"]);
 
-export function fontFor(style, px = 1, family = SANS) {
+export function fontFor(style, px = 1, family = style.mono ? MONO : SANS) {
   return `${style.italic ? "italic " : ""}${style.weight} ${style.size * px}px ${family}`;
 }
 
@@ -118,6 +123,11 @@ function headerBlocks(node, measure, width, refInfo) {
     push("summary", STYLES.summary, wrapText(measure, node.summary, STYLES.summary, width));
     y += 6;
   }
+  if (node.fileItems?.length) {
+    // the files this node owns, at a glance
+    push("files", STYLES.files, fitItems(measure, node.fileItems, STYLES.files, width, 2));
+    y += 6;
+  }
   if (node.details) {
     push("details", STYLES.body, wrapText(measure, node.details, STYLES.body, width));
     y += 6;
@@ -158,6 +168,33 @@ function headerBlocks(node, measure, width, refInfo) {
   return { blocks, height: y, width: textW };
 }
 
+/** A rest-of-file pane: its code lines plus one row per run of lines shown elsewhere. */
+export function restGeometry(rp) {
+  const end = Math.min(rp.total, REST_MAX_LINES);
+  const rows = restRows(rp.segments, 1, end).length;
+  const visible = Math.min(rows, PANE_MAX_VISIBLE);
+  return { start: 1, end, count: rows, truncated: rp.total > end, h: PANE_HEAD + visible * PANE_LINE + 10, w: PANE_W };
+}
+
+/**
+ * The rows of a rest-of-file pane between lines lo and hi: {n} for a line of code, and
+ * {fold: [segments]} for each run of lines shown elsewhere (adjacent runs merged).
+ */
+export function restRows(segments, lo, hi) {
+  const rows = [];
+  for (const seg of segments) {
+    if (seg.end < lo || seg.start > hi) continue;
+    if (seg.kind === "code") {
+      for (let n = Math.max(lo, seg.start); n <= Math.min(hi, seg.end); n++) rows.push({ n });
+    } else if (rows.length && rows[rows.length - 1].fold) {
+      rows[rows.length - 1].fold.push(seg);
+    } else {
+      rows.push({ fold: [seg] });
+    }
+  }
+  return rows;
+}
+
 export function paneGeometry(ref, res) {
   // Which lines a pane shows and how tall it is (local units).
   const total = res.total_lines || 0;
@@ -171,6 +208,32 @@ export function paneGeometry(ref, res) {
   const count = end - start + 1;
   const visible = Math.min(count, PANE_MAX_VISIBLE);
   return { start, end, count, truncated, h: PANE_HEAD + visible * PANE_LINE + 10, w: PANE_W };
+}
+
+/** Items joined with " · " into at most maxLines lines; what does not fit becomes "+N more". */
+export function fitItems(measure, items, style, maxW, maxLines) {
+  const font = fontFor(style);
+  const sep = "  ·  ";
+  const lines = [];
+  let line = "";
+  for (let i = 0; i < items.length; i++) {
+    const cand = line ? line + sep + items[i] : items[i];
+    if (measure(font, cand) <= maxW || !line) { line = cand; continue; }
+    if (lines.length === maxLines - 1) {
+      // last line: make room for the rest's count
+      let rest = items.length - i;
+      while (line.includes(sep) && measure(font, `${line}${sep}+${rest} more`) > maxW) {
+        line = line.slice(0, line.lastIndexOf(sep));
+        rest++;
+      }
+      lines.push(`${line}${sep}+${rest} more`);
+      return lines;
+    }
+    lines.push(line);
+    line = items[i];
+  }
+  if (line) lines.push(line);
+  return lines;
 }
 
 function pack(items, minRowW) {
@@ -200,7 +263,7 @@ const SIDE_PAD = 10;
 
 function regionGap(weight, root) {
   // wider channels where more connections have to pass
-  return root ? clampN(110 + 10 * Math.sqrt(weight), 120, 320) : clampN(30 + 5 * Math.sqrt(weight), 34, 110);
+  return root ? clampN(110 + 10 * Math.sqrt(weight), 120, 320) : clampN(44 + 6 * Math.sqrt(weight), 50, 140);
 }
 const clampN = (v, lo, hi) => Math.max(lo, Math.min(hi, v));
 
@@ -391,7 +454,22 @@ export function computeLayout(model, refInfo, measure, opts = {}) {
       const pane = { id: pid, nodeId: id, ref: r, res, ...g };
       panes.set(pid, pane);
       paneIds.push(pid);
-      paneItems.push({ kind: "pane", id: pid, box: pane, w: pane.w * PANE_K, h: pane.h * PANE_K });
+      paneItems.push({ kind: "pane", id: pid, box: pane, w: pane.w * PANE_K, h: pane.h * PANE_K + CAPTION_H,
+        paneK: PANE_K, capH: CAPTION_H });
+    }
+    // an area shows the rest of each file it owns: what no pane inside it shows already.
+    // These panes are as large as the code panes of its items, so code reads at one zoom.
+    for (const rp of n.restPanes || []) {
+      const key = `${rp.path}#~rest`;
+      const ref = { path: rp.path, symbol: null, key };
+      const res = { status: "rest", start: 1, end: rp.total, total_lines: rp.total,
+        message: "code that no node of this area shows: cite it from the node it belongs to" };
+      const pid = `${id}::${key}`;
+      const pane = { id: pid, nodeId: id, ref, res, rest: true, segments: rp.segments, ...restGeometry(rp) };
+      panes.set(pid, pane);
+      paneIds.push(pid);
+      paneItems.push({ kind: "pane", id: pid, box: pane, w: pane.w * REST_K, h: pane.h * REST_K + CAPTION_H * K,
+        paneK: REST_K, capH: CAPTION_H * K });
     }
     const box = { id, node: n, paneIds, depth: n.depth, x: 0, y: 0, scale: 1, items: [] };
     let gridW = 0, gridH = 0;
@@ -405,9 +483,9 @@ export function computeLayout(model, refInfo, measure, opts = {}) {
       gridW = g.width;
       gridH = g.height;
     }
-    const panesBody = pack(paneItems, CARD_W - 2 * PAD);
+    const panesBody = pack(paneItems, Math.max(CARD_W - 2 * PAD, gridW));
     // keep the outermost channel well inside the border so its lines do not hug it
-    const sidePad = kids.length ? Math.max(SIDE_PAD, box.gap * 0.35) : SIDE_PAD;
+    const sidePad = kids.length ? Math.max(SIDE_PAD, box.gap * 0.5) : SIDE_PAD;
     const w = Math.max(CARD_W, gridW + 2 * sidePad, panesBody.w + 2 * PAD);
     const textW = Math.min(w, TEXT_MAX_W) - 2 * PAD;
     const header = headerBlocks(n, measure, textW, refInfo);
@@ -513,7 +591,7 @@ export function computeLayout(model, refInfo, measure, opts = {}) {
     for (const it of box.items) {
       const x = box.x + it.lx * s, y = box.y + it.ly * s;
       if (it.kind === "node") Object.assign(it.box, { x, y, scale: s * K });
-      else Object.assign(it.box, { x, y, scale: s * PANE_K });
+      else Object.assign(it.box, { x, y: y + it.capH * s, scale: s * it.paneK });
     }
   }
 

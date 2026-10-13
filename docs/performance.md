@@ -76,6 +76,14 @@ per region, only for regions whose items are visible), layout got more expensive
 | Inside-first router: spacing constraints between every pair of nearby parallel pieces (7.7 million in one region of the huge map); obstacle checks scanning every box; free spots on a box side recomputed for each candidate shape | constraints only between neighbours (sweep line, after the order is decided); a spatial index of obstacles per region; free intervals per side cached until the side is claimed; shapes skipped by a lower bound before spots are picked; no strict search on fully claimed sides | deep 6.1 s → 2.7 s; dense 6.7 s → 2.4 s; huge 7.3 s (separation alone had taken 9.5 s) |
 | Rip-up placed every crossing line again in up to four full passes (40,000 reroutes on the huge map) | later passes only revisit lines crossing a line that moved; skipped above 1,500 nodes; Zs beside crossed lines only for the lines the best path crosses, after the ordinary shapes | huge 77 s → 8.4 s; deep 6.1 s → 3.8 s |
 
+| Gaps marking line crossings were computed and drawn for every crossing of every drawn line (millions on the dense map at overview) | gaps only in regions drawing ≤ 400 lines, at most 3,000 per region and frame | dense overview frame 6.3 s → 80 ms |
+
+**Open (2026-10-13).** The 300-edge overview budget above did not survive the routing
+rewrite: overview frames draw every visible route again. Render p95 on the stress maps is
+now deep 28 ms, dense 72 ms, huge 76 ms (bundled maps 4–5 ms); see
+`bench/results/2026-10-13-container.json`. A per-frame budget for routes, weakest first and
+counted in the status bar, is the next step.
+
 ## Supported limits (declared)
 
 - **Fluid (60 Hz, p95 frame interval ≤ ~22 ms) and opening within ~4 s:** maps up to

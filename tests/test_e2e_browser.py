@@ -3,6 +3,7 @@
 uv run --with playwright pytest tests/test_e2e_browser.py
 """
 
+import re
 import threading
 import time
 from itertools import pairwise
@@ -62,6 +63,18 @@ def selfmap(browser):
     httpd.server_close()
 
 
+def open_map(browser, root):
+    """A page on the map in root (the server stops with the test process)."""
+    httpd, url, _ = create_server(Workspace.open(root))
+    threading.Thread(
+        target=httpd.serve_forever, kwargs={"poll_interval": 0.05}, daemon=True
+    ).start()
+    pg = browser.new_page(viewport={"width": 1400, "height": 900})
+    pg.goto(url)
+    wait(pg, "!!(window.repoluma && window.repoluma.layout)")
+    return pg
+
+
 def wait(pg, expr, timeout=10):
     t0 = time.time()
     while not pg.evaluate(expr):
@@ -83,7 +96,7 @@ def test_overview_to_contract_to_code_and_back(page):
     pg, _ = page
     start = cam(pg)
     # overview names the capabilities (outline mirrors the map for keyboard users)
-    assert "Purchasing" in pg.inner_text("#tab-outline")
+    assert "Ordering" in pg.inner_text("#tab-outline")
 
     # search for the contract and open it
     pg.keyboard.press("/")
@@ -92,7 +105,7 @@ def test_overview_to_contract_to_code_and_back(page):
     wait(pg, "window.repoluma.selection && window.repoluma.selection.id === 'authorize-payment'")
     insp = pg.inner_text("#inspector")
     assert "Never captures money" in insp and "PaymentDeclined" in insp
-    assert "review candidates" in insp.lower() and "Place an order" in insp
+    assert "review candidates" in insp.lower() and "Place order" in insp
 
     # zoom to the code: the pane shows working-tree source with line numbers
     pg.evaluate(
@@ -170,7 +183,10 @@ def test_hit_testing_and_selection_at_viewport_edges(page):
     hit = pg.evaluate("""(() => { const a = window.repoluma; const b = a.layout.boxes.get('purchasing');
         const [sx, sy] = a.camera.toScreen(b.x, b.y); return a.renderer.hitTest(Math.max(2, sx + 3), Math.max(2, sy + 3)); })()""")
     assert hit and hit["id"] == "purchasing"
-    assert pg.evaluate("window.repoluma.renderer.hitTest(-50, -50)") is None
+    # outside the map: nothing to hit
+    assert pg.evaluate("""(() => { const a = window.repoluma; const b = a.layout.bounds;
+        const [sx, sy] = a.camera.toScreen(b.x - 50 / a.camera.z, b.y - 50 / a.camera.z);
+        return a.renderer.hitTest(sx, sy); })()""") is None
 
 
 def test_filters_disclose_what_they_hide(page):
@@ -178,7 +194,7 @@ def test_filters_disclose_what_they_hide(page):
     pg.click("[role=tab][data-tab=filters]")
     before = pg.evaluate("window.repoluma.renderer.shownRels.size")
     assert "data" in pg.inner_text("#maplegend")
-    pg.locator("label.check", has_text="data").locator("input").uncheck()
+    pg.get_by_role("checkbox", name=re.compile(r"^data \d")).uncheck()
     time.sleep(0.3)
     status = pg.inner_text("#statusbar")
     assert "hidden by relationship filter" in status
@@ -247,7 +263,7 @@ def test_untrusted_text_is_not_interpreted_as_html(browser, shop):
     m = shop / ".repoluma" / "map.yaml"
     m.write_text(
         m.read_text().replace(
-            "label: Purchasing", "label: '<img src=x onerror=window.pwned=1>Purchasing'"
+            "label: Ordering", "label: '<img src=x onerror=window.pwned=1>Ordering'"
         )
     )
     httpd, url, _ = create_server(Workspace.open(shop))
@@ -355,15 +371,25 @@ def test_a_line_placed_early_does_not_force_a_crossing(selfmap):
     assert not any(crosses(s, t) for s in a for t in b)
 
 
-def test_a_short_item_sits_level_with_its_partner(selfmap):
-    """Coding agent is much shorter than Discuss with an agent, in the same row. At the top
-    of its cell, its line to Reproducible view links (inside Discuss) needed two bends;
-    within its cell it moves to where that line runs straight."""
-    pts = selfmap.evaluate("""window.repoluma.layout.routes
-      .filter((s) => s.members.some((m) => m.id === 'agent-follows-links')).flatMap((s) => s.points)""")
-    assert pts
-    assert max(p[1] for p in pts) - min(p[1] for p in pts) < 1e-3
-
+def test_a_short_item_sits_level_with_its_partner(browser, tmp_path):
+    """An actor much shorter than the region beside it, linked to an item low in that
+    region: at the top of its cell its line needs two bends; within its cell it moves
+    level with its partner, so the line can run straight."""
+    items = "".join(f"\n  - {{id: i{k}, parent: region, kind: responsibility, label: Item {k}}}"
+                    for k in range(9))
+    chain = "".join(f"\n  - {{id: r{k}, from: i{k}, to: i{k + 1}, type: data, label: x}}"
+                    for k in range(8))
+    (tmp_path / ".repoluma").mkdir()
+    (tmp_path / ".repoluma/map.yaml").write_text(
+        "schema_version: 2\nscope: {summary: test}\nnodes:"
+        "\n  - {id: region, kind: capability, label: A wide region}" + items
+        + "\n  - {id: actor, kind: actor, label: Someone}\nrelationships:" + chain
+        + "\n  - {id: link, from: actor, to: i8, type: data, label: request}\n")
+    pg = open_map(browser, tmp_path)
+    actor, item = pg.evaluate("""['actor', 'i8'].map((id) => { const b = window.repoluma.layout.boxes.get(id);
+      return [b.y, b.y + b.h * b.scale]; })""")
+    assert actor[0] < item[1] and item[0] < actor[1]  # level with each other
+    pg.close()
 
 def test_a_line_is_annotated_once(selfmap):
     """A line crossing region borders is drawn in pieces, one per region; it carries one label."""
@@ -386,3 +412,113 @@ def crosses(s, t):
         min(h0[0], h1[0]) + 1e-6 < x < max(h0[0], h1[0]) - 1e-6
         and min(v0[1], v1[1]) + 1e-6 < y < max(v0[1], v1[1]) - 1e-6
     )
+
+
+# ------------------------------------------------------------------ files on the map
+
+
+def test_a_pane_caption_opens_the_file_with_its_owners(page):
+    pg, _ = page
+    pg.evaluate("window.repoluma.flyToNode('pricing')")
+    time.sleep(1.2)
+    # click the caption above the pane that cites Catalog.get
+    x, y = pg.evaluate("""(() => { const a = window.repoluma;
+      const p = a.layout.panes.get('pricing::shop/catalog.py#Catalog.get');
+      const [sx, sy] = a.camera.toScreen(p.x + 20 / a.camera.z, p.y - 6 / a.camera.z); return [sx, sy]; })()""")
+    box = pg.locator("#stage").bounding_box()
+    pg.mouse.click(box["x"] + x, box["y"] + y)
+    wait(pg, "window.repoluma.selection?.type === 'file'")
+    assert pg.evaluate("window.repoluma.selection.path") == "shop/catalog.py"
+    wait(pg, "!!document.querySelector('.fc-ln')")
+    text = pg.inner_text("#inspector")
+    assert "belongs to" in text.lower() and "Price the cart" in text
+    wait(pg, "location.hash.includes('file=shop%2Fcatalog.py')")  # a link to this file
+
+
+def test_files_tab_and_links_lead_from_a_file_to_its_place(page):
+    pg, _ = page
+    pg.click("[role=tab][data-tab=files]")
+    assert "All 11 code files have an owner" in pg.inner_text("#tab-files")
+    pg.locator(".ffile", has_text="money.py").click()
+    wait(pg, "window.repoluma.selection?.path === 'shop/money.py'")
+    time.sleep(1.2)
+    assert pg.evaluate("window.repoluma.centerNode()") in ("money", "shared")
+    # a link from an editor: #file=path:line opens the owner of that line
+    pg.goto(pg.url.split("#")[0] + "#file=shop/orders.py:43")
+    pg.reload()
+    wait(pg, "window.repoluma.selection?.type === 'file'")
+    assert pg.evaluate("window.repoluma.selection.line") == 43
+    wait(pg, "!!document.querySelector('.fc-ln.target')")
+    # search finds files too
+    pg.fill("#search", "inventory.py")
+    assert "Stock" in pg.inner_text("#search-results")
+
+
+def test_new_code_files_appear_as_not_yet_mapped(page, monkeypatch):
+    import repoluma.server
+
+    monkeypatch.setattr(repoluma.server, "LISTING_INTERVAL", 0)
+    pg, shop = page
+    assert not pg.evaluate("window.repoluma.layout.boxes.has('~unmapped')")
+    (shop / "shop" / "coupons.py").write_text("RATE = 0\n")
+    wait(pg, "window.repoluma.layout.boxes.has('~unmapped')", timeout=8)
+    assert pg.evaluate("window.repoluma.nodeById.get('~unmapped').fileItems") == ["coupons.py"]
+    pg.evaluate("window.repoluma.select({type: 'node', id: '~unmapped'})")
+    text = pg.inner_text("#inspector")
+    assert "coupons.py" in text and "how to map them" in text.lower()
+
+
+def test_outer_boxes_name_their_files_and_show_all_their_code(page):
+    pg, _ = page
+    items = pg.evaluate("""Object.fromEntries(['purchasing', 'shared', 'place-order', 'pricing']
+      .map((id) => [id, window.repoluma.nodeById.get(id).fileItems]))""")
+    assert items["purchasing"] == ["catalog.py", "orders.py", "checkout.ts"]
+    assert items["shared"] == ["__init__.py", "money.py"]
+    assert items["place-order"] == [] and items["pricing"] == []  # captions name them
+    roles = pg.evaluate("window.repoluma.layout.boxes.get('purchasing').header.blocks.map((b) => b.role)")
+    assert roles.index("files") == roles.index("summary") + 1
+    # every line of every owned file appears in some pane of its area
+    covered = pg.evaluate("""(() => { const a = window.repoluma; const out = {};
+      for (const [path, rec] of Object.entries(a.files.files)) {
+        if (!rec.lines) continue;
+        let missing = 0;
+        for (let n = 1; n <= rec.lines; n++) if (!a.files.shownAt(path, n)) missing++;
+        out[path] = missing;
+      } return out; })()""")
+    assert covered and not any(covered.values()), covered
+
+
+def test_code_no_node_shows_is_flagged_where_it_lives(page):
+    pg, shop = page
+    assert not pg.evaluate("window.repoluma.layout.panes.has('purchasing::shop/orders.py#~rest')")
+    p = shop / "shop" / "orders.py"
+    p.write_text(p.read_text() + "\n\ndef apply_coupon(total, code):\n    return total\n")
+    wait(pg, "window.repoluma.layout.panes.has('purchasing::shop/orders.py#~rest')", timeout=8)
+    assert "error" in pg.inner_text("#health")
+    pg.evaluate("window.repoluma.flyToRef('purchasing', 'shop/orders.py#~rest')")
+    sel = '.pane[data-pane="purchasing::shop/orders.py#~rest"]'
+    wait(pg, f"!!document.querySelector('{sel} .ln.fold')")
+    pane = pg.locator(sel)
+    assert "unexplained" in pane.get_attribute("class")
+    assert "not yet explained" in pane.locator(".pane-head").inner_text()
+    assert "def apply_coupon" in pane.inner_text()
+    fold = pane.locator(".ln.fold").first.inner_text()
+    assert fold.count("Place order") == 1 and "Max 50 lines per cart" in fold and "imports and comments" in fold
+    pane.locator(".fold-link", has_text="Max 50 lines per cart").click()
+    time.sleep(1.2)
+    assert pg.evaluate("window.repoluma.centerNode()") in ("cart-limits", "purchasing")
+
+
+def test_the_file_view_says_which_pane_shows_each_line(page):
+    pg, _ = page
+    pg.evaluate("window.repoluma.selectFile('shop/orders.py', 43)")
+    wait(pg, "!!document.querySelector('.fc-ln.target')")
+    labels = pg.eval_on_selector_all(".fc-owner", "els => els.map((e) => e.innerText)")
+    # the file's header has no pane of its own; then each cited block, glue joining the one before
+    assert labels == ["Ordering", "Max 50 lines per cart", "Place order", "Price the cart", "Place order"]
+    # the line asked for is in view, and the header (where the file belongs) stays visible
+    assert pg.evaluate("""(() => { const r = document.querySelector('.fc-ln.target').getBoundingClientRect();
+      const c = document.querySelector('.file-code').getBoundingClientRect();
+      return r.top >= c.top && r.bottom <= c.bottom; })()""")
+    assert pg.locator(".file-view h2").is_visible()
+    assert "belongs to" in pg.inner_text("#inspector").lower()

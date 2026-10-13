@@ -36,7 +36,8 @@ reload loop. Change detection compares `stat` tokens of the map and referenced f
 1. Use the map to look at the part you are changing (search with `/`, follow a flow,
    read the code in place).
 2. Change the code. If you rename, move or change the meaning of something the map
-   describes, update the map in the same change; keep ids stable.
+   describes, update the map in the same change; keep ids stable. New code files need a
+   place on the map (`owns`); `repoluma where <file>` shows where a file belongs.
 3. `uv run repoluma validate` (CI-equivalent: `just check`). Moved symbols show up as
    `ref-missing-symbol` / `ref-moved`.
 4. Follow the affected flow in the viewer from overview to code and check that the

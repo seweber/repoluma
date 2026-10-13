@@ -25,11 +25,13 @@
   <aside id="sidebar" aria-label="Map navigation">
     <div role="tablist" aria-orientation="vertical" class="tabs">
       <button role="tab" data-tab="outline" aria-selected="true">Outline</button>
+      <button role="tab" data-tab="files" aria-selected="false" tabindex="-1">Files</button>
       <button role="tab" data-tab="flows" aria-selected="false" tabindex="-1">Flows</button>
       <button role="tab" data-tab="filters" aria-selected="false" tabindex="-1">Layers</button>
       <button role="tab" data-tab="coverage" aria-selected="false" tabindex="-1">Coverage</button>
     </div>
     <div id="tab-outline" role="tabpanel" class="tabpanel"></div>
+    <div id="tab-files" role="tabpanel" class="tabpanel" hidden></div>
     <div id="tab-flows" role="tabpanel" class="tabpanel" hidden></div>
     <div id="tab-filters" role="tabpanel" class="tabpanel" hidden></div>
     <div id="tab-coverage" role="tabpanel" class="tabpanel" hidden></div>
@@ -62,6 +64,7 @@
         <tr><td><kbd>Ctrl</kbd> + wheel</td><td>Always zooms, even over an active code pane.</td></tr>
         <tr><td><kbd>Shift</kbd> + wheel</td><td>Pan sideways.</td></tr>
         <tr><td><kbd>/</kbd></td><td>Search labels, ids, summaries and file paths.</td></tr>
+        <tr><td>Files tab</td><td>Every file and the area it belongs to. Click a file (or the file name above a code pane) to see which pane shows each of its lines.</td></tr>
         <tr><td><kbd>0</kbd> / <kbd>b</kbd> / <kbd>u</kbd></td><td>Whole map / back to previous view / select the containing item.</td></tr>
         <tr><td><kbd>n</kbd> / <kbd>p</kbd></td><td>Next / previous step of the active flow.</td></tr>
         <tr><td><kbd>c</kbd></td><td>Copy the selection as text for a coding agent (ids, source, relationships, link).</td></tr>

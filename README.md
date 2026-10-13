@@ -16,6 +16,13 @@ validates that description against the real code and serves a local, zoomable ma
   read live from your working tree, with line numbers, freshness, and resolution status.
 - **Follow the data**: relationships are data (labelled with what moves, arrow from source
   to destination), control, or dependency, explained by a legend on the map.
+- **Find every file's place**: each code file belongs to exactly one area of the map
+  (`owns` on top-level nodes), each area names its files, and every line of code must be
+  shown by a node of its area (`validate` fails on code no node explains; the viewer
+  flags it).
+  From any file (the Files tab, a code pane's file name, `#file=path:line`, or
+  `repoluma where path:line`) you reach its area and the pane showing each line. Code
+  files without an owner show up as "not yet mapped".
 - **Follow a flow** step by step across responsibilities, including what happens on failure.
 - **Stay honest**: unresolved references, uncertain claims, unmodeled directories, and
   hidden-by-filter counts are shown, not hidden.
@@ -51,7 +58,8 @@ opens a small fictional shop with a complete map.
 | `repoluma prompt` | Print the agent prompt again. |
 | `repoluma guide` | Print the authoring guide for agents (matches this version). `--format skill --write DIR` exports it as a `SKILL.md` for agents that use skills. Nothing is installed into agent configuration automatically. |
 | `repoluma schema` | Print the JSON Schema of the map format. |
-| `repoluma validate` | Check the map and resolve every source reference. `--json` for machine-readable diagnostics, `--strict` to fail on warnings. Exit status 1 on errors. |
+| `repoluma validate` | Check the map, resolve every source reference, and check that every code file has exactly one owner. `--json` for machine-readable diagnostics, `--strict` to fail on warnings. Exit status 1 on errors. |
+| `repoluma where PATH[:LINE]` | Which area owns a file (or one line of it), which pane shows that line, and which nodes cite it. `--json`; exit status 1 if it has no owner. |
 | `repoluma serve` | Serve the viewer on loopback. `--root`, `--map`, `--port`, `--no-open`. |
 | `repoluma example DIR` | Copy the example repository with its map. |
 
@@ -68,10 +76,11 @@ opens a small fictional shop with a complete map.
 | `n` / `p` | next / previous step of the active flow |
 | `c` | copy the selection as text for a coding agent |
 
-The left panel has an **Outline** (keyboard-accessible tree), **Flows**, **Layers**
-(relationship types, node kinds, tags, uncertainty highlighting, legend), and
-**Coverage** (diagnostics, reference status, changed-since-review, claims without
-evidence, per-directory coverage). The URL always encodes the current view, selection,
+The left panel has an **Outline** (keyboard-accessible tree), **Files** (every file and
+the node it belongs to), **Flows**, **Layers** (relationship types, node kinds, tags,
+uncertainty highlighting, legend), and **Coverage** (diagnostics, reference status,
+changed-since-review, claims without evidence, files without an owner). Clicking a file,
+or the file name above a code pane, shows the whole file and which pane on the map shows each line. The URL always encodes the current view, selection,
 flow step, and filters.
 
 ## Documentation

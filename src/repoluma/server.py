@@ -17,6 +17,7 @@ import json
 import mimetypes
 import secrets
 import threading
+import time
 from http import HTTPStatus
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from importlib import resources
@@ -25,8 +26,10 @@ from urllib.parse import parse_qs, urlsplit
 
 from . import __version__
 from .model import iter_refs
-from .sources import Repository, SourceError
+from .sources import Repository, SourceError, list_files
 from .workspace import Workspace
+
+LISTING_INTERVAL = 5.0  # seconds between file listings while polling
 
 STATIC_TYPES = {
     ".js": "text/javascript",
@@ -58,10 +61,22 @@ class ViewerState:
         self._analysis: dict[str, Any] | None = None
         self._tokens: dict[str, str] = {}
         self._ref_paths: set[str] = set()
+        self._served: set[str] = set()
+        self._listing: tuple[float, str] = (0.0, "")
         self.repo = Repository(workspace.root)
 
     def _tokens_now(self) -> dict[str, str]:
-        return self.ws.watch_tokens(sorted(self._ref_paths), self.repo)
+        tokens = self.ws.watch_tokens(sorted(self._ref_paths), self.repo)
+        tokens["__files__"] = self._listing_token()
+        return tokens
+
+    def _listing_token(self) -> str:
+        """Digest of the file list (files added or removed change ownership); at most every 5 s."""
+        now = time.monotonic()
+        if now - self._listing[0] > LISTING_INTERVAL:
+            files, _ = list_files(self.ws.root, self.repo)
+            self._listing = (now, hashlib.sha1("\0".join(files).encode()).hexdigest()[:16])
+        return self._listing[1]
 
     def analysis(self, force: bool = False) -> dict[str, Any]:
         with self.lock:
@@ -70,6 +85,11 @@ class ViewerState:
                 model = self._analysis.get("model")
                 self.repo = Repository(self.ws.root, model["source"]["exclude"] if model else [])
                 self._ref_paths = {r["path"] for _, _, r in iter_refs(model)} if model else set()
+                # files whose analysis depends on their content: refs and parts of files
+                own = self._analysis.get("ownership") or {"files": {}}
+                self._ref_paths |= {p for p, rec in own["files"].items() if rec["parts"]}
+                self._served = self._ref_paths | set(own["files"])
+                self._listing = (0.0, "")
                 self._tokens = self._tokens_now()
             return self._analysis
 
@@ -84,10 +104,10 @@ class ViewerState:
 
     def source(self, rel: str, start: int, end: int) -> dict[str, Any]:
         self.analysis()
-        if rel not in self._ref_paths:
+        if rel not in self._served:
             raise SourceError(
                 "not_referenced",
-                f"{rel} is not referenced by the map; only referenced files are served",
+                f"{rel} is not referenced or owned by the map; only those files are served",
             )
         return self.repo.excerpt(rel, start, end)
 

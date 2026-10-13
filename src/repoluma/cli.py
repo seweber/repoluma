@@ -1,4 +1,4 @@
-"""Command-line interface: init, validate, serve, guide, schema, example, prompt."""
+"""Command-line interface: init, validate, where, serve, guide, schema, example, prompt."""
 
 from __future__ import annotations
 
@@ -126,6 +126,7 @@ def cmd_validate(args) -> int:
             "warnings": len(warnings),
             "diagnostics": diags,
             "refs": analysis["refs"],
+            "ownership": analysis.get("ownership"),
         }
         print(json.dumps(out, indent=2))
     else:
@@ -157,9 +158,15 @@ def cmd_validate(args) -> int:
                 for r in refs.values()
                 if r["status"] in ("resolved", "heuristic", "lines", "file", "moved")
             )
+            own = (analysis.get("ownership") or {}).get("counts")
+            owned = (
+                f"; {own['owned_required']}/{own['required']} code files have an owner"
+                if own
+                else ""
+            )
             print(
                 f"{analysis['map_path']}: {c['nodes']} nodes, {c['relationships']} relationships,"
-                f" {c['flows']} flows; {ok_refs}/{len(refs)} source refs resolve"
+                f" {c['flows']} flows; {ok_refs}/{len(refs)} source refs resolve{owned}"
             )
             infos = len(diags) - len(errors) - len(warnings)
             if infos and not args.verbose:
@@ -169,6 +176,126 @@ def cmd_validate(args) -> int:
     if errors or (args.strict and warnings):
         return 1
     return 0
+
+
+def cmd_where(args) -> int:
+    from .ownership import owner_at
+
+    ws = _workspace(args)
+    rel, line = _repo_path(ws.root, args.path)
+    analysis = ws.analyze(with_git=False, with_coverage=False)
+    model = analysis["model"]
+    if model is None:
+        print(f"The map at {analysis['map_path']} cannot be read; run `repoluma validate`.")
+        return 1
+    own = analysis["ownership"] or {"files": {}}
+    entry = own["files"].get(rel)
+    by_id = {n["id"]: n for n in model["nodes"]}
+    owner, part = owner_at(entry, line)
+    cited = []
+    for n in model["nodes"]:
+        for r in n["refs"]:
+            res = analysis["refs"].get(r["key"], {})
+            if r["path"] != rel:
+                continue
+            if line is not None and res.get("start") and not res["start"] <= line <= res["end"]:
+                continue
+            span = f" L{res['start']}-{res['end']}" if res.get("start") else ""
+            cited.append(f"{n['id']} ({r.get('symbol') or 'file'}{span})")
+    # where the line is shown on the map: a citing node's pane, or its area's rest-of-file pane
+    shown = None
+    if line is not None and owner:
+        for rp in own.get("rest", []):
+            if rp["area"] == owner and rp["path"] == rel:
+                seg = next((g for g in rp["segments"] if g["start"] <= line <= g["end"]), None)
+                if seg and seg["kind"] == "shown":
+                    shown = {"node": seg["node"], "ref": seg["ref"]}
+                elif seg and seg["kind"] == "code":
+                    shown = {"node": owner, "ref": f"{rel}#~rest"}
+        if shown is None:
+            spans = [
+                (res["end"] - res["start"], n["id"], r["key"])
+                for n in model["nodes"]
+                for r in n["refs"]
+                if r["path"] == rel
+                and (res := analysis["refs"].get(r["key"], {})).get("start")
+                and res["start"] <= line <= res["end"]
+                and _chain_of(by_id, n["id"])[0] == owner
+            ]
+            if spans:
+                _, nid, key = min(spans)
+                shown = {"node": nid, "ref": key}
+    result = {
+        "path": rel,
+        "line": line,
+        "shown_in": shown,
+        "owner": owner,
+        "chain": _chain_of(by_id, owner),
+        "pattern": entry["pattern"] if entry and not part else None,
+        "part": part,
+        "parts": entry["parts"] if entry else [],
+        "required": entry["required"] if entry else None,
+        "cited_by": cited,
+    }
+    if args.json:
+        print(json.dumps(result, indent=2))
+        return 0 if owner else 1
+    print(rel + (f":{line}" if line else ""))
+    if owner:
+        n = by_id[owner]
+        print(f"  owner    {n['label']}  ({owner}, {n['kind']})")
+        print(f"  on map   {' › '.join(by_id[a]['label'] for a in result['chain'])}")
+        if n.get("summary"):
+            print(f"  summary  {n['summary']}")
+        if part:
+            print(f"  by       owns {rel}#{part['symbol']} (lines {part['start']}-{part['end']})")
+        else:
+            print(f"  by       owns {entry['pattern']}")
+        if shown:
+            where = ("its rest-of-file pane" if shown["ref"].endswith("#~rest")
+                     else f"shown in {by_id[shown['node']]['label']} ({shown['ref']})")
+            print(f"  line     {where}")
+    elif not (rel in own["files"] or (ws.root / rel).is_file()):
+        print("  not a file in this repository (or excluded from display)")
+        return 1
+    else:
+        need = entry["required"] if entry else False
+        partly = " (only parts of it are owned)" if entry and entry["parts"] else ""
+        print(f"  owner    none{partly}")
+        print("  " + ("this code file should have an owner: add it to a node's 'owns'"
+                      if need else "needs no owner (tests, docs, tooling or ignored files)"))
+    others = [p for p in result["parts"] if p is not part]
+    if others and line is None:
+        print("  parts    " + "; ".join(
+            f"{p['symbol']} (L{p['start']}-{p['end']}) → {p['node']}" for p in others))
+    if cited:
+        print("  cited by " + ", ".join(cited))
+    print(f"  view     {_cmd_name()} serve, then open #file={rel}" + (f":{line}" if line else ""))
+    return 0 if owner else 1
+
+
+def _repo_path(root: Path, raw: str) -> tuple[str, int | None]:
+    """Accept 'path', 'path:LINE', absolute paths and paths relative to the current directory."""
+    import re
+
+    line = None
+    m = re.fullmatch(r"(.+?):(\d+)", raw)
+    if m:
+        raw, line = m.group(1), int(m.group(2))
+    p = Path(raw)
+    cand = p if p.is_absolute() else Path.cwd() / p
+    try:
+        return cand.resolve().relative_to(root).as_posix(), line
+    except ValueError:
+        return raw if p.is_absolute() else raw.replace("\\", "/").removeprefix("./"), line
+
+
+def _chain_of(by_id, nid):
+    chain = []
+    while nid and nid in by_id and nid not in chain:
+        chain.insert(0, nid)
+        nid = by_id[nid]["parent"]
+    return chain
 
 
 def _counts(model):
@@ -263,6 +390,12 @@ def build_parser() -> argparse.ArgumentParser:
     sp.add_argument("--no-git", action="store_true", help="skip git change-since-review checks")
     sp.add_argument("-v", "--verbose", action="store_true", help="also show informational notes")
     sp.set_defaults(func=cmd_validate)
+
+    sp = sub.add_parser("where", help="show which part of the map a file (or line) belongs to")
+    common(sp)
+    sp.add_argument("path", help="a file, optionally with :LINE (e.g. src/app/util.py:42)")
+    sp.add_argument("--json", action="store_true", help="machine-readable output")
+    sp.set_defaults(func=cmd_where)
 
     sp = sub.add_parser("serve", help="serve the interactive viewer on localhost")
     common(sp)

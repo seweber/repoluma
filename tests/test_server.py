@@ -80,11 +80,16 @@ def test_read_only(server):
     assert request(port, "/api/status", {"X-Repoluma-Token": token}, method="POST")[0] == 405
 
 
-def test_source_endpoint_serves_only_referenced_files(server):
-    port, token, _ = server
+def test_source_endpoint_serves_only_referenced_or_owned_files(server):
+    port, token, shop = server
     status, data = api(port, token, "/api/source?path=shop/orders.py&start=1&end=5")
     assert status == 200 and data["lines"][0].startswith('"""')
-    for bad in ("shop/__init__.py", "../etc/passwd", ".repoluma/map.yaml", "/etc/passwd"):
+    # owned, not referenced: shown in the file view
+    status, data = api(port, token, "/api/source?path=shop/__init__.py&start=1&end=5")
+    assert status == 200 and data["lines"]
+    (shop / "notes.txt").write_text("not on the map\n")
+    (shop / ".env").write_text("SECRET=1\n")
+    for bad in ("notes.txt", ".env", "../etc/passwd", ".repoluma/map.yaml", "/etc/passwd"):
         status, data = api(port, token, f"/api/source?path={bad}")
         assert data.get("error") in ("not_referenced",), (bad, data)
 
@@ -102,6 +107,19 @@ def test_status_digest_changes_when_referenced_file_changes(server):
     q.write_text(q.read_text() + "\n# edit\n")
     _, s3 = api(port, token, "/api/status")
     assert s3["digest"] == s2["digest"]
+
+
+def test_status_digest_changes_when_files_are_added(server, monkeypatch):
+    import repoluma.server
+
+    monkeypatch.setattr(repoluma.server, "LISTING_INTERVAL", 0)
+    port, token, shop = server
+    _, s1 = api(port, token, "/api/status")
+    (shop / "shop" / "coupons.py").write_text("RATE = 0\n")
+    _, s2 = api(port, token, "/api/status")
+    assert s1["digest"] != s2["digest"]
+    _, boot = api(port, token, "/api/bootstrap")
+    assert boot["ownership"]["unowned"] == ["shop/coupons.py"]
 
 
 def test_bootstrap_without_map(tmp_path):

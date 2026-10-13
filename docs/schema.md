@@ -73,6 +73,53 @@ the flow jumps over the nodes in between, which the viewer then dims although th
 passes through them, and `validate` warns (`step-via-gap`). Flows add no lines and do not
 influence layout. These are warnings, so maps that were valid stay valid.
 
+## Ownership: one home per file
+
+`refs` are evidence (many nodes may cite the same code); `owns` is placement: every code
+file has exactly one owning area (a top-level node), so a file found anywhere leads to one
+place on the map, and every line of it is shown inside that area.
+
+- `owns` is accepted on top-level nodes only; on an inner node it is an error
+  (`owns-not-top-level`) and is counted for the node's area meanwhile.
+
+- An `owns` entry is an exact path, a folder (`dir/`, or `dir` when that names a
+  folder), a glob (`*` within a segment, `**` across segments, `?`, `[...]`), or
+  `path#Symbol` for part of one file. Paths follow the reference rules (relative, `/`,
+  no `..`); `**` alone is refused.
+- A file's area is decided by the **most specific** matching pattern: exact paths beat
+  globs; among globs, more fixed leading segments, then more fixed characters. Equal
+  specificity from different nodes is `ownership-conflict` (an error); the file is shown
+  under the first of them in id order meanwhile.
+- `path#Symbol` is resolved like a reference symbol. The part belongs to that node; the
+  file's owner keeps the rest; the innermost part containing a line wins. The same part
+  claimed twice is a conflict; a missing symbol is an error (`owns-missing-symbol`).
+- A file *needs* an owner if its extension is a code language and it is not a test, doc,
+  vendored, generated or hidden-tooling file (`repoluma.ownership.DEFAULT_UNREQUIRED`),
+  minus `source.ownership.ignore`, plus `source.ownership.require`. Files that need an
+  owner and have none are `unowned-file` warnings, grouped per folder, with a suggested
+  owner where refs point at them (the deepest node containing every citing node).
+- The file list is `git ls-files --cached --others --exclude-standard` (or a walk outside
+  git), minus `source.exclude` and the default exclusions; ownership is recomputed when
+  files are added or removed.
+- **Coverage of code.** Every line of a code file must be shown by a node of the area
+  that owns it: inside the range of a displayable ref of that node or a node within it
+  (citations from other areas do not count). Glue needs none: blank lines, comments,
+  imports (multi-line ones too), the module docstring, `__all__`, the `__main__` block,
+  lines of only closing brackets, and a class's header (decorators, `class` line,
+  docstring) when a member of the class is shown. Anything else is an `unexplained-code`
+  error, one per area and file, naming the symbols (Python syntax tree; enclosing
+  definitions by text pattern elsewhere) and the nodes showing code nearby.
+- **Display.** For each area and file with unexplained code, `ownership.rest` lists
+  segments covering the file: `code` (unexplained, with glue next to it), `glue`, `shown`
+  (with the node and ref whose pane shows it; the smallest such ref wins) and `other`
+  (another area's part, or no owner). The viewer draws it as a dashed "not yet explained"
+  pane in the area. Code that needs an owner and has none is listed under `~unmapped`,
+  drawn as "Not yet mapped". Non-code files are owned but not checked for coverage.
+- The analysis payload carries `ownership.files` (owner, deciding pattern, parts, whether
+  an owner is required, line count) for owned files, files that need an owner, and cited
+  files, plus `ownership.unowned`, `ownership.rest` and counts. Within schema version 2
+  these are additive fields.
+
 ## Reference resolution semantics
 
 A reference is `{path, symbol?, lines?, role?, note?}` (or `path#symbol`, `path:a-b`).

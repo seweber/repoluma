@@ -19,24 +19,30 @@ nodes:
   # ---------------------------------------------------------------- purchasing
   - id: purchasing
     kind: capability
-    label: Purchasing
+    label: Ordering
     summary: Customers turn a cart into a confirmed order with stock held and funds authorized.
+    owns:
+      - web/checkout.ts
+      - shop/orders.py
+      - shop/catalog.py
 
   - id: checkout-form
     parent: purchasing
     kind: component
-    label: Checkout form (browser)
+    label: Checkout form
     summary: Collects a payment token from the provider widget and submits the cart.
     evidence: observed
     refs:
       - path: web/checkout.ts
         symbol: submitCheckout
+      - path: web/checkout.ts
+        symbol: CartLine
     notes: Posts to /api/orders, which is not part of this repository.
 
   - id: place-order
     parent: purchasing
     kind: responsibility
-    label: Place an order
+    label: Place order
     summary: Validates the cart, reserves stock, authorizes payment, then confirms and announces the order.
     details: All-or-nothing. A declined payment releases the stock reservation so nothing stays held.
     contract:
@@ -59,6 +65,12 @@ nodes:
       - path: tests/test_orders.py
         symbol: test_declined_payment_releases_reservation
         role: test
+      - path: shop/orders.py
+        symbol: CheckoutError
+      - path: shop/orders.py
+        symbol: Order
+      - path: shop/orders.py
+        symbol: OrderService.__init__
 
   - id: pricing
     parent: purchasing
@@ -73,11 +85,15 @@ nodes:
         symbol: Catalog.get
       - path: shop/money.py
         symbol: Money
+      - path: shop/catalog.py
+        symbol: Product
+      - path: shop/catalog.py
+        symbol: Catalog.__init__
 
   - id: cart-limits
     parent: purchasing
     kind: rule
-    label: Cart limits
+    label: Max 50 lines per cart
     summary: An order has 1 to 50 lines and every quantity is positive.
     evidence: observed
     refs:
@@ -89,11 +105,13 @@ nodes:
     kind: capability
     label: Payments
     summary: Holds, collects and returns customer money through an external payment provider.
+    owns:
+      - shop/payments.py
 
   - id: authorize-payment
     parent: payments
     kind: contract
-    label: Authorize payment
+    label: Payment authorization
     summary: Hold funds for an order without collecting them.
     contract:
       inputs:
@@ -112,6 +130,12 @@ nodes:
     refs:
       - path: shop/payments.py
         symbol: PaymentService.authorize
+      - path: shop/payments.py
+        symbol: PaymentDeclined
+      - path: shop/payments.py
+        symbol: Authorization
+      - path: shop/payments.py
+        symbol: PaymentService.__init__
 
   - id: capture-payment
     parent: payments
@@ -150,8 +174,10 @@ nodes:
   # --------------------------------------------------------------------- stock
   - id: stock
     kind: capability
-    label: Stock
+    label: Inventory
     summary: Knows what is on hand and holds goods for confirmed orders.
+    owns:
+      - shop/inventory.py
 
   - id: reserve-stock
     parent: stock
@@ -162,11 +188,15 @@ nodes:
     refs:
       - path: shop/inventory.py
         symbol: Inventory.reserve
+      - path: shop/inventory.py
+        symbol: OutOfStock
+      - path: shop/inventory.py
+        symbol: Reservation
 
   - id: release-stock
     parent: stock
     kind: responsibility
-    label: Release reservation
+    label: Release reserved stock
     summary: Gives held stock back when an order fails.
     evidence: observed
     refs:
@@ -176,7 +206,7 @@ nodes:
   - id: commit-stock
     parent: stock
     kind: responsibility
-    label: Commit stock on shipment
+    label: Deduct shipped stock
     summary: Converts a reservation into a stock decrement.
     evidence: observed
     refs:
@@ -186,7 +216,7 @@ nodes:
   - id: no-partial-reservations
     parent: stock
     kind: rule
-    label: No partial reservations
+    label: All lines reserved or none
     summary: If any line lacks stock, nothing is reserved.
     evidence: observed
     refs:
@@ -199,7 +229,7 @@ nodes:
   - id: inventory-store
     parent: stock
     kind: resource
-    label: Inventory levels
+    label: Stock levels
     summary: In-memory on-hand and reserved counts per SKU.
     evidence: observed
     refs:
@@ -209,30 +239,36 @@ nodes:
   # --------------------------------------------------------------- fulfillment
   - id: fulfillment
     kind: capability
-    label: Fulfillment
+    label: Shipping
     summary: Ships confirmed orders and collects payment at that moment.
+    owns:
+      - shop/fulfillment.py
 
   - id: ship-order
     parent: fulfillment
     kind: responsibility
-    label: Ship an order
+    label: Ship order
     summary: Commits stock, captures payment and publishes order.shipped.
     details: Capture happens only here, so customers are charged when goods leave.
     evidence: observed
     refs:
       - path: shop/fulfillment.py
         symbol: Fulfillment.ship
+      - path: shop/fulfillment.py
+        symbol: Fulfillment.__init__
 
   # ------------------------------------------------------------------- returns
   - id: returns
     kind: capability
     label: Returns
     summary: Takes back shipped goods within 30 days and refunds the full order.
+    owns:
+      - shop/returns.py
 
   - id: accept-return
     parent: returns
     kind: responsibility
-    label: Accept a return
+    label: Accept returned order
     summary: Restocks the goods and refunds the order total.
     evidence: observed
     refs:
@@ -242,7 +278,7 @@ nodes:
   - id: return-window
     parent: returns
     kind: rule
-    label: 30-day return window
+    label: No returns after 30 days
     summary: Returns are rejected more than 30 days after delivery.
     evidence: observed
     refs:
@@ -251,39 +287,65 @@ nodes:
       - path: README.md
         symbol: Returns
         role: docs
+      - path: shop/returns.py
+        symbol: ReturnRejected
 
   - id: partial-returns
     parent: returns
     kind: rule
-    label: Partial returns
+    label: Whole-order returns only
     summary: Not supported; only whole orders can be returned. Unclear whether this is intended.
     evidence: needs_review
 
   # ------------------------------------------------------- customer messaging
   - id: messaging
     kind: capability
-    label: Customer messaging
+    label: Customer notifications
     summary: Tells customers what happened to their order.
+    owns:
+      - shop/notifications.py
+      - shop/events.py
 
   - id: order-emails
     parent: messaging
     kind: responsibility
-    label: Order e-mails
+    label: Send order e-mails
     summary: Sends a confirmation e-mail; shipment e-mails are not implemented yet.
     evidence: observed
     refs:
       - path: shop/notifications.py
         symbol: register
+      - path: shop/notifications.py
+        symbol: Mailer
 
   - id: event-bus
     parent: messaging
     kind: resource
-    label: Order events
+    label: Order event bus
     summary: In-process publish/subscribe for order.confirmed and order.shipped.
     evidence: observed
     refs:
       - path: shop/events.py
         symbol: EventBus
+
+  # -------------------------------------------------------------------- shared
+  - id: shared
+    kind: area
+    label: Shared value types
+    summary: Small pieces every area uses; they make no business decisions of their own.
+    owns:
+      - shop/__init__.py
+      - shop/money.py
+
+  - id: money
+    parent: shared
+    kind: data
+    label: Money amounts
+    summary: Amounts in integer cents with a currency; adding different currencies is an error.
+    evidence: observed
+    refs:
+      - path: shop/money.py
+        symbol: Money
 
   # ------------------------------------------------------------------ outside
   - id: payment-provider

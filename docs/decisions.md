@@ -188,6 +188,19 @@ Rip-up and the crossing price removed crossings a single pass could not avoid (t
 between the same regions taking each other's side); where ends cannot line up, a short
 step is now preferred over a crossing.
 
+Spacing (2026-10-13). Lines read as cramped: parallel lines and arrowheads on one box side
+were about 5 px apart at the zoom where items are readable, lines ran close to region
+borders and started next to box corners. Raising the separation or clearance relative to
+the channel width made lines cross more (repoluma 10 → 14 crossings each): the channels
+became too narrow for the same lines. What helped was wider channels with the same ratios
+(region gap `44 + 6√w`, at least 50, instead of `30 + 5√w`, at least 34), line ends kept
+half a gap from box corners (was 0.3), region contents kept half a gap from the border,
+and line ends on a box side spaced 1.6 × the line separation so arrowheads stay apart.
+Measured on the maps as they now are (both larger than above, with ownership):
+shop 8 / 26 / 0 → 8 / 28 / 0, repoluma 10 / 45 / 0 → 11 / 42 / 0, with about 45% more
+space between lines. Results swing with the arrangement search (other gap formulas gave
+7 to 21 crossings on repoluma), so changes here should be measured on several maps.
+
 The remaining crossings and turn-backs come from where boxes sit (an item between a line's
 end and the region border, a region title spanning most of the top edge); improving them
 is a placement question.
@@ -296,6 +309,133 @@ checks this). It is connection-driven rather than author-ordered, so adding a
 relationship can move items within its region; regions keep their place unless their
 size changes. If this proves disorienting after edits, the next step is to remember the
 previous positions per id and add them as anchors.
+
+## 11. Files on the map: one area per file, every line of code shown by a node
+
+**Problem.** A reader who comes across a file (in an editor, a diff, a stack trace) should
+find its role on the map, and later, changes to the source should show up on the map.
+Both need every file to appear somewhere, and visibly. `refs` could not do this: they are
+curated evidence, many-to-many (the self-map cited `sources.py` from 7 nodes), and they
+covered 41% of the self-map's non-test source lines. Boxes did not say which files they
+were built from.
+
+**Alternatives.** (a) Require `refs` to cover everything: maps fill up with whole-file
+panes and evidence loses its focus. (b) Let a file appear under every node that uses it:
+"where is this file?" has several answers and a changed line lights up many boxes.
+(c) A separate mapping from files to nodes that is a partition, as in architecture
+conformance checking (reflexion models: Murphy, Notkin and Sullivan 1995; Sonargraph,
+Structure101, Lattix, import-linter, Nx module boundaries, Bazel/Pants target ownership)
+and `CODEOWNERS`. (d) Fine-grained concern mapping (symbol sets per concept): known to be
+costly to keep current.
+
+**Choice.** (c), with file-level ownership as the rule and symbol-level splits as the
+exception, and **owners are areas** (top-level nodes). `owns` takes paths, folders and
+globs; the most specific pattern wins (exact beats glob, then more fixed segments), the
+CODEOWNERS idiom without its order dependence. `path#Symbol` gives part of a file to
+another area: `cli.py` belongs to "Map authoring", while `cmd_validate` belongs to
+"Map validation". No two areas own the same lines; a file used everywhere (`utils.py`,
+`money.py`) gets an area of its own and is cited by its users. Tests, docs, tooling and
+generated files need no owner by default.
+
+A first version let any node own files. In use, the file line on inner boxes repeated what
+their code panes' captions already said, the overview (where only areas are readable)
+showed no files, and owning a file did not make its code appear: `index.html` was owned
+but shown nowhere. So ownership moved to areas, and **every line of an owned file is shown
+inside its area**: in the pane of the node that cites it, and otherwise in the area's own
+"rest of the file" pane, where lines shown in other panes are folded into links to them
+(`⋯ lines 12–14 shown in Cart limits`). Refs therefore decide where inside an area code
+appears; the remainder never duplicates a pane of the same area. Lines cited only from
+other areas stay in the owner's pane, so an area's code is complete on its own. Code
+without an owner is shown in a "Not yet mapped" region (dashed, only while not empty, at
+most 24 panes: it is a to-do list).
+
+A second step made the remainder a fault. With "rest of the file" panes as a normal
+place for code, much of the code sat in areas without a box, a summary or a line, so the
+map said nothing about it (on the self-map about 4,000 lines, 90% real code). Now every
+line of code must be shown by a node of its area; otherwise `validate` fails with
+`unexplained-code`. It is a validation error rather than a format rule because coverage
+depends on the code, not the map: adding a function makes yesterday's map incomplete, so
+the viewer keeps showing such code (in a dashed "not yet explained" pane) while the error
+tells the agent to fix the map. Glue (imports, docstrings, comments, closing brackets, a
+class header whose members are shown) is exempt, and whole-class or whole-file refs count,
+so a helper module can be one node instead of one per function. Relationships stay
+optional: a widely used helper does not need a line from each user. Fixing the self-map
+took three new nodes (Viewer app shell, Page and styles, Shared helpers) and whole-file
+refs on the leaves that implement each file; the shop needed eight refs (exception and
+record classes, constructors). Code panes now hold up to 2,000 lines (the server's limit
+per request) so that whole-file refs show whole files; they render lazily and keep their
+height.
+
+**Visuals.** Each area names its files in one muted monospace line under its summary
+(folder groups such as `web/js/ (9 files)`), readable at overview. Inner boxes show no file
+line: their panes' captions (folder dimmed, file name strong, symbol, `↗ owner` when the
+cited lines belong to another area) name the files at the node's text size. Rest-of-file
+panes are as large as the code panes of the area's items, so all code reads at one zoom.
+The file view in the inspector colours each line by the pane that shows it, labels where
+that changes, marks cited lines, and outlines the owners on the map. The Files tab lists
+every file with its area; `#file=path:line` links and `repoluma where` lead from a file or
+line to its area and pane.
+
+**Observed.** The shop moved its `owns` to seven areas plus "Shared building blocks"
+(`money.py`, imported by four modules); the self-map to seven areas, with `cli.py` split by
+command and `model.py#json_schema` and `#_link_steps` given to the areas they serve.
+Layout metrics moved within the usual swing (repoluma 11 → 13 crossings) because areas now
+hold rest panes. With every line shown exactly once per area, attributing a diff to panes
+is a lookup; the change overlay is the next step.
+
+**Revisit if** maps of large repositories need ownership by language-aware rules (e.g.
+packages), or authors split files often enough that an explicit "shared" marker reads
+better than a node of its own.
+
+## 12. Box names: by kind, specific, readable alone, tested with readers
+
+**Problem.** The self-map's labels were hard to interpret: verb and noun phrases mixed
+among siblings, abstract names ("Navigate meaning", "Describe a repository"), labels that
+only make sense under their parent ("Other languages"), button texts ("Copy for agent")
+and lone generic nouns ("Analysis", "Source cache"). The guide said only "short display
+name in the system's own language".
+
+**Sources.** Capability-modelling guidance disagrees on nouns versus verbs (noun phrases
+such as "Customer Management" in most guides; verb–noun with strong verbs in EDGY), but
+agrees on consistency within a level, short names at the top, the domain's own words and
+avoiding empty words like "manage". Identifier studies favour full words over
+abbreviations (Lawrie, Morrell, Feild, Binkley 2007), and Feitelson et al. (2021, 2024)
+found that choosing the concepts first, then the words, then the form yields better names
+than asking for "longer, more descriptive" ones. DDD names modules after domain concepts
+and treats Manager/Helper/Utils as smells.
+
+**Experiment.** Writer agents labelled both bundled maps from the nodes' descriptions
+alone (no existing labels) under four rule sets: the old guide (A), noun phrases everywhere
+(B), nouns for areas and things with verb + object for responsibilities (C), and C refined
+(D: rules stated as constraints, data named by what it holds, no lone generic nouns, a
+final list check). Readers matching labels to a shuffled list of descriptions scored
+nearly 100% for every set (elimination makes that test too easy). Readers instead wrote,
+for each label alone, what they thought the box does; a blind judge scored the guesses
+against the real descriptions (0 wrong, 1 partly, 2 right), mixed across sets:
+
+| labels | repoluma (49) | shop (29) | wrong guesses |
+| --- | --- | --- | --- |
+| current | 1.80–1.82 | 1.90–1.93 | 2 |
+| A old guide | 1.76 | 1.90 | 2 |
+| B nouns | 1.80 | 1.90 | 2 |
+| C by kind | 1.86–1.90 | 1.93–2.00 | 0–1 |
+| D by kind, refined | 1.94 | 1.97 | 0 |
+
+Replicates of C differ by up to 0.07, so C and D are close; both remove the misreadings
+the others produce. The failures explain the rules: lone nouns ("Analysis", "Layout",
+"Constant scale", "File lookup"), nominalisations read the other way ("Text pattern
+matching"), rules named as topics ("Partial returns": feature or ban?) and abstract areas
+("Navigate meaning"); verb + specific object ("Trace change impact", "Reanalyze on file
+changes") and rules stated as constraints ("Whole-order returns only") were read right.
+D's one weakness, rule labels growing into sentences, became the "short name of the
+constraint" rule.
+
+**Choice.** The guide's "Naming boxes" section: form by kind (areas and things noun
+phrases, responsibilities verb + object, rules the rule itself), specific words, readable
+alone, short, and a final check of the flat list. Both bundled maps were relabelled with it.
+
+**Revisit if** human readers disagree with the agent readers (the test used one model
+family as writer, reader and judge), or maps in other domains show labels drifting long.
 
 ## Assumptions (not stated by the brief)
 

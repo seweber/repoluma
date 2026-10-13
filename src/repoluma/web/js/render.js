@@ -3,8 +3,10 @@
 // as DOM by panes.js; this file only draws their placeholders.
 
 import {
-  CARD_W, K, MONO, PANE_HEAD, PANE_LINE, SANS, STYLES, fontFor, headerRect, relText, worldRect,
+  CAPTION_H, CARD_W, K, MONO, PANE_HEAD, PANE_K, PANE_LINE, SANS, STYLES, fontFor, headerRect, relText,
+  restRows, worldRect,
 } from "./layout.js";
+import { UNMAPPED_ID, splitPath } from "./files.js";
 import { clamp, rectsIntersect } from "./util.js";
 
 export const TITLE_MIN_PX = 7; // below this a node shows an overview label instead
@@ -27,6 +29,8 @@ const TYPE_STYLE = {
   control: { width: 0.9, alpha: 0.7 },
   dependency: { width: 0.7, alpha: 0.55 },
 };
+const GAP_MAX_LINES = 400; // regions drawing more lines than this get no crossing gaps
+const GAP_MAX_CROSSINGS = 3000; // at most this many gaps per region and frame
 const DASH = { needs_review: [8, 5], unknown: [2, 4], planned: [12, 6] };
 
 export function readTheme() {
@@ -76,7 +80,7 @@ export class Renderer {
     const h = this.hueOf(box.id);
     const t = this.theme;
     const kind = box.node.kind;
-    if (kind === "external" || kind === "actor") {
+    if (kind === "external" || kind === "actor" || box.id === UNMAPPED_ID) {
       return t.dark ? "hsl(220 8% 20%)" : "hsl(220 10% 95%)";
     }
     const l = t.dark ? (box.depth % 2 ? 17 : 21) : (box.depth % 2 ? 99 : 95.5);
@@ -85,6 +89,7 @@ export class Renderer {
   }
 
   strokeFor(box) {
+    if (box.id === UNMAPPED_ID) return this.theme.ink3;
     const h = this.hueOf(box.id);
     return this.theme.dark ? `hsl(${h} 30% 45%)` : `hsl(${h} 30% 62%)`;
   }
@@ -181,7 +186,8 @@ export class Renderer {
     const ev = box.node.evidence;
     ctx.lineWidth = clamp(1.6 * px, 0.6, 2);
     ctx.strokeStyle = this.strokeFor(box);
-    if (DASH[ev]) ctx.setLineDash(DASH[ev]);
+    const dash = box.id === UNMAPPED_ID ? [6, 4] : DASH[ev];
+    if (dash) ctx.setLineDash(dash);
     ctx.stroke();
     ctx.setLineDash([]);
     if ((box.node.kind === "external" || box.node.kind === "actor") && sw > 20 && sh > 20) {
@@ -235,7 +241,7 @@ export class Renderer {
       const by = y0 + b.y * px;
       if (fpx < 2) continue;
       const color = b.role === "title" ? t.ink : b.role === "kind" || b.role === "tags" ||
-        b.role === "label" ? t.ink2 : b.role === "warn" ? t.warn : t.ink;
+        b.role === "label" || b.role === "files" ? t.ink2 : b.role === "warn" ? t.warn : t.ink;
       if (fpx < 5) {
         // greeked text keeps the shape of what is there without unreadable glyphs
         ctx.fillStyle = color;
@@ -279,10 +285,17 @@ export class Renderer {
       const maxLines = clamp(Math.floor(room / (size * 1.2)), 2, 3);
       lines = wrapFit(ctx, text, maxW, maxLines);
     }
-    const lh = size * 1.2;
+    let lh = size * 1.2;
+    if (lines.length * lh + 6 > sh) {
+      // a short box: one shortened line at the smallest size rather than no name at all
+      size = 9;
+      lh = size * 1.2;
+      ctx.font = `600 ${size}px ${SANS}`;
+      lines = [fitText(ctx, text, maxW)];
+    }
     const blockH = lines.length * lh;
     const ty = sy + Math.min(6, sh * 0.1);
-    if (blockH + 6 > sh) return;
+    if (blockH + 4 > sh || !lines[0]) return;
     ctx.textBaseline = "top";
     const tw = Math.max(...lines.map((l) => ctx.measureText(l).width));
     ctx.fillStyle = this.fillFor(box);
@@ -303,6 +316,7 @@ export class Renderer {
     const [sx, sy] = cam.toScreen(pane.x, pane.y);
     const sh = pane.h * px;
     this.stats.panes++;
+    this.drawCaption(pane, dim);
     const fontPx = 13 * px;
     this.visiblePanes.push({ pane, px, sx, sy, dom: fontPx >= PANE_DOM_MIN_FONT });
     ctx.save();
@@ -310,19 +324,16 @@ export class Renderer {
     roundRect(ctx, sx, sy, sw, sh, clamp(6 * px, 1, 8));
     ctx.fillStyle = this.theme.codeBg;
     ctx.fill();
-    ctx.strokeStyle = this.theme.line;
-    ctx.lineWidth = 1;
+    // code no node explains is a gap in the map: drawn like one
+    ctx.strokeStyle = pane.rest ? this.theme.warn : this.theme.line;
+    ctx.lineWidth = pane.rest ? 1.5 : 1;
+    if (pane.rest) ctx.setLineDash([5, 4]);
     ctx.stroke();
+    ctx.setLineDash([]);
     if (fontPx >= PANE_DOM_MIN_FONT) { ctx.restore(); return; } // DOM pane draws over it
-    // header strip
+    // header strip (the file itself is named by the caption above the pane)
     ctx.fillStyle = this.theme.line;
     ctx.fillRect(sx, sy + PANE_HEAD * px - 1, sw, 1);
-    if (14 * px >= 6) {
-      ctx.fillStyle = this.theme.ink2;
-      ctx.font = `${14 * px}px ${MONO}`;
-      ctx.textBaseline = "middle";
-      ctx.fillText(fitText(ctx, pane.ref.key, sw - 12 * px), sx + 10 * px, sy + PANE_HEAD * px / 2);
-    }
     // greek the actual code shape when it is loaded
     const src = this.app.sources.peek(pane);
     const lh = PANE_LINE * px;
@@ -331,9 +342,21 @@ export class Renderer {
       ctx.globalAlpha *= 0.5;
       const maxLines = Math.floor((pane.h - PANE_HEAD - 10) / PANE_LINE);
       const charW = 7.8 * px;
+      const rows = pane.rest && src && src.lines ? restRows(pane.segments, src.start, src.end) : null;
       for (let i = 0; i < maxLines; i++) {
         let indent = 0, len = 24 + ((i * 37) % 30);
-        if (src && src.lines) {
+        if (rows) {
+          const row = rows[i];
+          if (!row) break;
+          if (row.fold) { // a fold: a short faint bar where the line numbers are
+            ctx.fillRect(sx + 20 * px, sy + PANE_HEAD * px + 5 * px + i * lh, 24 * px, Math.max(0.5, lh * 0.3));
+            continue;
+          }
+          const ln = src.lines[row.n - src.start];
+          if (ln === undefined) break;
+          indent = ln.length - ln.trimStart().length;
+          len = ln.trim().length;
+        } else if (src && src.lines) {
           const ln = src.lines[i];
           if (ln === undefined) break;
           indent = ln.length - ln.trimStart().length;
@@ -348,6 +371,77 @@ export class Renderer {
     }
     ctx.restore();
     if (!src) this.app.sources.want(pane);
+  }
+
+  /**
+   * A pane's caption: the file (folder dimmed, name strong) and symbol it shows, readable at
+   * the zoom where the node's own text is, and the file's owner when that is another node.
+   */
+  drawCaption(pane, dim) {
+    const cam = this.app.camera;
+    const ns = pane.scale / PANE_K; // the node's scale
+    const npx = cam.z * ns;
+    const st = STYLES.caption;
+    const fpx = st.size * npx;
+    if (fpx < 1.5) return;
+    const { ctx } = this;
+    const [sx, sy0] = cam.toScreen(pane.x, pane.y - CAPTION_H * ns);
+    const w = pane.w * pane.scale * cam.z;
+    const sy = sy0 + (CAPTION_H - 8) * npx; // baseline, just above the pane
+    ctx.save();
+    if (dim) ctx.globalAlpha *= 0.32;
+    const [dir, name] = splitPath(pane.ref.path);
+    const sym = pane.rest ? (pane.nodeId === UNMAPPED_ID ? "  · no owner yet" : "  · not yet explained") :
+      pane.ref.symbol ? "  › " + pane.ref.symbol : "";
+    const files = this.app.files;
+    const owner = files?.ownerAt(pane.ref.path, pane.res.start);
+    const home = !pane.rest && owner && owner !== pane.nodeId && !this.app.descendants(pane.nodeId).has(owner) ?
+      this.app.nodeById.get(owner) : null;
+    const t = this.theme;
+    if (fpx < 4) {
+      // greeked: the caption's shape, so the pane still reads as "a file"
+      ctx.fillStyle = t.ink2;
+      ctx.globalAlpha *= 0.3;
+      const len = Math.min((dir.length + name.length + sym.length) * st.size * 0.6 * npx, w);
+      ctx.fillRect(sx, sy - fpx * 0.7, len, Math.max(0.6, fpx * 0.6));
+      ctx.restore();
+      return;
+    }
+    const strong = `600 ${fpx}px ${MONO}`, weak = `${st.weight} ${fpx}px ${MONO}`;
+    let homeText = home ? `↗ ${home.label}` : "";
+    ctx.font = `${fpx * 0.86}px ${SANS}`;
+    let homeW = homeText ? ctx.measureText(homeText).width + 12 * npx : 0;
+    if (homeW > w * 0.4) { homeText = fitText(ctx, homeText, w * 0.4 - 12 * npx); homeW = w * 0.4; }
+    let room = w - homeW;
+    ctx.textBaseline = "alphabetic";
+    // name first (it identifies the file), then as much of the folder as fits before it
+    ctx.font = strong;
+    const nameW = ctx.measureText(name).width;
+    ctx.font = weak;
+    const symText = fitText(ctx, sym, Math.max(0, room - nameW));
+    const symW = symText ? ctx.measureText(symText).width : 0;
+    const dirText = fitTextLeft(ctx, dir, Math.max(0, room - nameW - symW));
+    const dirW = dirText ? ctx.measureText(dirText).width : 0;
+    let x = sx;
+    ctx.fillStyle = t.ink3;
+    if (dirText) ctx.fillText(dirText, x, sy);
+    x += dirW;
+    ctx.font = strong;
+    ctx.fillStyle = t.ink;
+    ctx.fillText(fitText(ctx, name, room), x, sy);
+    x += nameW;
+    ctx.font = weak;
+    ctx.fillStyle = pane.rest ? t.warn : t.ink2;
+    if (symText) ctx.fillText(symText, x, sy);
+    if (homeText) {
+      ctx.font = `${fpx * 0.86}px ${SANS}`;
+      ctx.fillStyle = t.ink3;
+      ctx.textAlign = "right";
+      ctx.fillText(homeText, sx + w, sy);
+      ctx.textAlign = "left";
+    }
+    this.stats.text++;
+    ctx.restore();
   }
 
   // -------------------------------------------------------------------- edges
@@ -436,8 +530,10 @@ export class Renderer {
     }
     // crossings: a short gap in the horizontal line makes a crossing read as a crossing,
     // not as a junction where lines meet
+    // (only where lines can still be told apart: in a thicket of lines the gaps are noise,
+    // and their number grows with the square of the lines)
     const bg = box ? this.fillFor(box) : this.theme.bg;
-    const crossings = screenCrossings(drawn);
+    const crossings = drawn.length <= GAP_MAX_LINES ? screenCrossings(drawn) : [];
     for (const c of crossings) {
       const { h, v, x, y } = c;
       const g = Math.max(3, v.width / 2 + 2.5);
@@ -623,6 +719,12 @@ export class Renderer {
     if (app.hover && app.hover !== app.selection?.id) outline(app.hover, this.theme.hover, 2);
     const sel = app.selection;
     if (sel?.type === "node") outline(sel.id, this.theme.sel, 3);
+    if (sel?.type === "file" && app.files) {
+      // the file's owners, and (fainter) the nodes that cite it
+      const owners = app.files.ownersOf(sel.path);
+      for (const c of app.files.cited.get(sel.path) || []) if (!owners.includes(c.node)) outline(c.node, this.theme.hover, 2);
+      for (const id of owners) outline(id, this.theme.sel, 3);
+    }
     if (sel?.type === "relationship") {
       const rel = app.relById.get(sel.id);
       if (rel) {
@@ -654,6 +756,11 @@ export class Renderer {
           const pw = p.w * p.scale, ph = p.h * p.scale;
           if (wx >= p.x && wy >= p.y && wx <= p.x + pw && wy <= p.y + ph && pw * cam.z >= 4) {
             found = { type: "pane", id: p.id, nodeId: box.id };
+            return true;
+          }
+          const ch = CAPTION_H * p.scale / PANE_K;
+          if (wx >= p.x && wy >= p.y - ch && wx <= p.x + pw && wy < p.y && ch * cam.z >= 6) {
+            found = { type: "caption", id: p.id, nodeId: box.id, path: p.ref.path, line: p.res.start };
             return true;
           }
         }
@@ -723,7 +830,7 @@ function arrowTip(ctx, pts, size) {
 }
 
 /** Proper crossings between horizontal and vertical pieces of different drawn lines. */
-function screenCrossings(drawn) {
+function screenCrossings(drawn, limit = GAP_MAX_CROSSINGS) {
   const H = [], V = [];
   drawn.forEach((d) => {
     for (let i = 1; i < d.pts.length; i++) {
@@ -740,6 +847,7 @@ function screenCrossings(drawn) {
     for (let k = lo; k < H.length && H[k][0] < y1 - 1; k++) {
       const [y, x0, x1, h] = H[k];
       if (h !== v && x > x0 + 1 && x < x1 - 1) out.push({ x, y, h, v });
+      if (out.length >= limit) return out;
     }
   }
   return out;
@@ -836,6 +944,17 @@ function flowBadge(ctx, x, y, text, color, current) {
   ctx.fillText(text, x + w / 2, y + h / 2 + 0.5);
   ctx.textAlign = "left";
   return w;
+}
+
+/** Like fitText, but keeps the end of the text (the part of a folder nearest the file). */
+function fitTextLeft(ctx, text, maxW) {
+  if (!text || ctx.measureText(text).width <= maxW) return text;
+  let lo = 0, hi = text.length;
+  while (lo < hi) {
+    const mid = (lo + hi) >> 1;
+    if (ctx.measureText("…" + text.slice(mid)).width <= maxW) hi = mid; else lo = mid + 1;
+  }
+  return lo >= text.length ? "" : "…" + text.slice(lo);
 }
 
 export function fitText(ctx, text, maxW) {

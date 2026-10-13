@@ -43,7 +43,7 @@ def test_validate_reports_and_fails_on_errors(tmp_path, capsys):
 
 def test_validate_example_ok(shop, capsys):
     assert main(["validate", "--root", str(shop)]) == 0
-    assert "22/22 source refs resolve" in capsys.readouterr().out
+    assert "36/36 source refs resolve" in capsys.readouterr().out
 
 
 def test_strict_turns_warnings_into_failure(tmp_path):

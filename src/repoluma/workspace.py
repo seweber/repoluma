@@ -9,6 +9,7 @@ from typing import Any
 
 from . import DEFAULT_MAP_PATH, __version__
 from .model import Diagnostic, LoadResult, iter_refs, load_map, ref_key
+from .ownership import compute_ownership, rest_of_files
 from .sources import DISPLAYABLE, Repository, coverage, git_state, list_files
 
 REF_SEVERITY = {
@@ -62,6 +63,7 @@ class Workspace:
         refs: dict[str, Any] = {}
         git: dict[str, Any] = {"is_repo": False}
         cov = None
+        ownership = None
         if model is not None:
             if with_git:
                 git = git_state(self.root, model["scope"]["reviewed_revision"])
@@ -98,13 +100,14 @@ class Workspace:
                         "scope",
                     )
                 )
+            files, truncated = list_files(self.root, repo)
+            ownership, own_diags = compute_ownership(model, files, repo, truncated)
+            ownership["rest"], rest_diags = rest_of_files(model, ownership, refs, repo)
+            diags.extend(own_diags + rest_diags)
             if with_coverage:
-                files, truncated = list_files(self.root, repo)
-                referenced = {r["path"] for _, _, r in iter_refs(model)}
                 cov = {
-                    "by_dir": coverage(files, referenced),
+                    "by_dir": coverage(ownership["files"]),
                     "files": len(files),
-                    "referenced": len(referenced & set(files)),
                     "truncated": truncated,
                 }
         return {
@@ -117,6 +120,7 @@ class Workspace:
             "refs": refs,
             "git": git,
             "coverage": cov,
+            "ownership": ownership,
             "elapsed_ms": round((time.perf_counter() - started) * 1000, 1),
         }
 

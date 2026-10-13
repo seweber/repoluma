@@ -109,7 +109,8 @@ TOP_FIELDS = {
 }
 REPOSITORY_FIELDS = {"name", "description"}
 SCOPE_FIELDS = {"summary", "covered", "not_covered", "reviewed_revision", "reviewed_at"}
-SOURCE_FIELDS = {"exclude"}
+SOURCE_FIELDS = {"exclude", "ownership"}
+OWNERSHIP_FIELDS = {"ignore", "require"}
 NODE_FIELDS = {
     "id",
     "label",
@@ -122,6 +123,7 @@ NODE_FIELDS = {
     "evidence",
     "confidence",
     "refs",
+    "owns",
     "notes",
 }
 REL_FIELDS = {
@@ -140,6 +142,7 @@ REL_FIELDS = {
 FLOW_FIELDS = {"id", "label", "summary", "evidence", "confidence", "steps", "tags", "notes"}
 STEP_FIELDS = {"id", "node", "label", "via", "after", "kind", "refs", "notes"}
 REF_FIELDS = {"path", "symbol", "lines", "role", "note"}
+GLOB_CHARS = set("*?[")
 
 
 @dataclass
@@ -481,6 +484,50 @@ class _Validator:
             )
         return out
 
+    def owns(self, obj: dict, location: str, record=None) -> list[dict[str, Any]]:
+        """``owns``: files (exact paths, globs, ``dir/``) or ``path#Symbol`` parts of a file."""
+        value = obj.get("owns")
+        if value is None:
+            return []
+        if isinstance(value, str):
+            value = [value]
+        if not isinstance(value, list):
+            self.add("error", "bad-type", "'owns' must be a list", f"{location}.owns", obj, record)
+            return []
+        out = []
+        for i, item in enumerate(value):
+            loc = f"{location}.owns[{i}]"
+            if not isinstance(item, str) or not item.strip():
+                self.add(
+                    "error",
+                    "bad-owns",
+                    "an 'owns' entry must be a path, a glob, 'dir/' or 'path#Symbol'",
+                    loc,
+                    obj,
+                    record,
+                )
+                continue
+            pattern, _, symbol = item.strip().partition("#")
+            symbol = symbol.strip() or None
+            problem = check_pattern(pattern)
+            if not problem and symbol and (GLOB_CHARS & set(pattern) or pattern.endswith("/")):
+                problem = "a '#Symbol' part needs one exact file path, not a glob or directory"
+            if problem:
+                self.add(
+                    "error",
+                    "bad-owns",
+                    f"owns {item.strip()!r}: {problem}",
+                    loc,
+                    obj,
+                    record,
+                    hint="use a repository-relative path ('src/app/service.py'), a glob "
+                    "('src/app/**', 'src/*.py'), a directory ('src/app/') or "
+                    "'src/app/util.py#Symbol' for part of a file",
+                )
+                continue
+            out.append({"pattern": pattern, "symbol": symbol, "location": loc, "line": _line(obj)})
+        return out
+
     def common(self, obj, location, record) -> dict[str, Any]:
         out = {}
         out["evidence"] = self.enum(obj, "evidence", EVIDENCE_STATES, location, record)
@@ -503,6 +550,15 @@ def check_relative_path(path: str) -> str | None:
     if "\x00" in path:
         return "must not contain NUL"
     return None
+
+
+def check_pattern(pattern: str) -> str | None:
+    """Problems with an ``owns`` pattern: like a path, but globs and a trailing '/' are fine."""
+    if not pattern:
+        return "empty pattern"
+    if pattern in ("**", "**/", "*"):
+        return "would own the whole repository; name the directories this node is about"
+    return check_relative_path(pattern.removesuffix("/"))
 
 
 def validate_document(doc: Any) -> LoadResult:
@@ -594,7 +650,27 @@ def validate_document(doc: Any) -> LoadResult:
         v.add("error", "bad-type", "'source' must be a mapping", "source", doc)
         source_raw = {}
     v.check_fields(source_raw, SOURCE_FIELDS, "source")
-    source = {"exclude": v.text_list(source_raw, "exclude", "source")}
+    source = {"exclude": v.text_list(source_raw, "exclude", "source"), "ownership": {}}
+    own_raw = source_raw.get("ownership") or {}
+    if not isinstance(own_raw, dict):
+        v.add("error", "bad-type", "'source.ownership' must be a mapping", "source.ownership", doc)
+        own_raw = {}
+    v.check_fields(own_raw, OWNERSHIP_FIELDS, "source.ownership")
+    for key in sorted(OWNERSHIP_FIELDS):
+        patterns = []
+        for i, pat in enumerate(v.text_list(own_raw, key, "source.ownership")):
+            problem = check_pattern(pat)
+            if problem:
+                v.add(
+                    "error",
+                    "bad-owns",
+                    f"source.ownership.{key}[{i}] {pat!r}: {problem}",
+                    f"source.ownership.{key}[{i}]",
+                    own_raw,
+                )
+            else:
+                patterns.append(pat)
+        source["ownership"][key] = patterns
 
     ids: dict[str, str] = {}  # id -> location, shared namespace for nodes/relationships/flows
 
@@ -682,6 +758,7 @@ def validate_document(doc: Any) -> LoadResult:
             "location": loc,
         }
         node.update(v.common(raw, loc, ident))
+        node["owns"] = v.owns(raw, loc, ident)
         nodes.append(node)
 
     by_id = {n["id"]: n for n in nodes}
@@ -753,6 +830,26 @@ def validate_document(doc: Any) -> LoadResult:
             cur = by_id[cur["parent"]]
         return d
 
+    # files belong to the outermost boxes (areas); inner boxes show code through refs
+    for n in nodes:
+        if n["owns"] and n["parent"] is not None:
+            area = by_id[n["parent"]]
+            while area["parent"] is not None:
+                area = by_id[area["parent"]]
+            v.add(
+                "error",
+                "owns-not-top-level",
+                f"'owns' belongs on top-level nodes; counted for '{area['id']}' for now",
+                f"{n['location']}.owns",
+                None,
+                n["id"],
+                hint=f"move these patterns to '{area['id']}' (the area this node is in); "
+                "inner nodes show their code with refs, and the rest of each file is shown "
+                "in its area",
+            )
+            v.diags[-1].line = n["line"]
+            area["owns"] = area["owns"] + n["owns"]
+            n["owns"] = []
     for n in nodes:
         n["depth"] = depth(n["id"])
         if n["kind"] == "contract" and not n["contract"]:
@@ -1298,6 +1395,13 @@ def json_schema() -> dict[str, Any]:
                 "properties": {f: text_list for f in CONTRACT_FIELDS},
             },
             "tags": text_list,
+            "owns": {
+                "description": "Top-level nodes only. Files this area owns: exact paths, "
+                "globs ('src/app/**'), directories ('src/app/') or part of a file "
+                "('path#Symbol'). Every code file has exactly one owner; the most specific "
+                "pattern wins.",
+                "oneOf": [text, {"type": "array", "items": text}],
+            },
             **common,
         },
     }
@@ -1383,7 +1487,14 @@ def json_schema() -> dict[str, Any]:
             "source": {
                 "type": "object",
                 "additionalProperties": False,
-                "properties": {"exclude": text_list},
+                "properties": {
+                    "exclude": text_list,
+                    "ownership": {
+                        "type": "object",
+                        "additionalProperties": False,
+                        "properties": {"ignore": text_list, "require": text_list},
+                    },
+                },
             },
             "nodes": {"type": "array", "items": node},
             "relationships": {"type": "array", "items": rel},

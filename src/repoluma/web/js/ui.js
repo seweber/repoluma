@@ -1,6 +1,8 @@
 // DOM panels: inspector, outline, flows, filters, coverage. Everything is built
 // with el()/textContent so map content can never inject markup.
 
+import { UNMAPPED_ID, splitPath } from "./files.js";
+import { languageOf, tokenize } from "./highlight.js";
 import { DISPLAYABLE, EVIDENCE_LABEL, REL_TYPES, kindLabel, relText } from "./layout.js";
 import { clear, copyText, el, plural } from "./util.js";
 
@@ -78,6 +80,7 @@ export function renderInspector(app, root) {
   if (sel.type === "node") root.append(renderNode(app, sel.id));
   else if (sel.type === "relationship") root.append(renderRelationship(app, sel.id));
   else if (sel.type === "bundle") root.append(renderBundle(app, sel.ids));
+  else if (sel.type === "file") root.append(renderFile(app, sel.path, sel.line));
 }
 
 function renderOverviewCard(app) {
@@ -97,7 +100,25 @@ function renderOverviewCard(app) {
         el("button", { class: "btn", title: "Show this flow's steps on the map", onclick: () => app.setFlow(f.id, 0) }, f.label))) : null));
 }
 
+/** The "Not yet mapped" region: code files without an owner, and how to give them one. */
+function renderUnmapped(app) {
+  const files = app.files;
+  return el("div", { class: "insp" },
+    el("div", { class: "insp-kind", text: "NOT YET MAPPED" }),
+    el("h2", { text: "Code files without an owner" }),
+    el("p", { class: "insp-summary", text: `${plural(files.unowned.length, "code file")} ${files.unowned.length === 1 ? "is" : "are"} not part of any node yet, so a reader cannot find ${files.unowned.length === 1 ? "its" : "their"} place on the map.` }),
+    section("Files", el("ul", { class: "owned" }, files.unowned.map((p) => {
+      const cited = files.cited.get(p) || [];
+      return el("li", {}, fileLink(app, p), cited.length ? el("div", { class: "small muted" }, "cited by ",
+        cited.map((c, i) => [i ? ", " : "", nodeLink(app, c.node)])) : null);
+    }))),
+    section("How to map them",
+      el("p", { class: "small", text: "Add each file to the 'owns' of the node it belongs to (a folder such as 'src/app/' covers many). If a file serves several areas, give it to the one it mainly serves, or split it with 'path#Symbol'. Files that need no place on the map go under source.ownership.ignore." }),
+      el("p", { class: "small muted" }, "`repoluma validate` suggests owners where the map already cites a file; `repoluma where <file>` shows where a file belongs.")));
+}
+
 function renderNode(app, id) {
+  if (id === UNMAPPED_ID) return renderUnmapped(app);
   const n = app.nodeById.get(id);
   if (!n) return el("p", { class: "muted", text: `Node '${id}' no longer exists.` });
   const chain = app.layout.ancestors.get(id) || [id];
@@ -133,6 +154,7 @@ function renderNode(app, id) {
     n.details ? el("p", { text: n.details }) : null,
     section("Contract", contract),
     n.notes ? section("Notes", el("p", { text: n.notes })) : null,
+    renderOwned(app, id),
     section("Evidence in source",
       (n.refs || []).length ? el("ul", { class: "refs" }, n.refs.map((r) => refRow(app, r, id))) :
         el("p", { class: "muted small", text: n.evidence === "planned" ? "Planned: no implementation expected yet." :
@@ -159,6 +181,176 @@ function renderNode(app, id) {
       el("p", { class: "small note", text: `Derived from ${plural(impact.considered, "modeled relationship")}: what depends on or starts this node or its contents, and where its data goes (up to 3 steps). A listed item may be unaffected; unmodeled dependents are possible.` +
         (app.model.scope?.not_covered?.length ? " The map's scope also excludes: " + app.model.scope.not_covered.join("; ") + "." : "") })),
     el("p", { class: "small muted", text: `Defined at ${app.data.map_path}:${n.line || "?"}` }));
+}
+
+/** A file name that opens the file view: the folder dimmed, the name strong. */
+function fileLink(app, path, line, extra) {
+  const [dir, name] = splitPath(path);
+  return el("button", { class: "link file-link", title: `Show ${path} and where each line is shown`,
+    onclick: () => app.selectFile(path, line ?? null) },
+  // the marks keep the folder's trailing slash in place in the right-to-left ellipsis box
+  el("span", { class: "fl-dir", text: dir ? "\u200e" + dir + "\u200e" : "" }), el("span", { class: "fl-name", text: name }),
+  extra ? el("span", { class: "muted small", text: " " + extra }) : null);
+}
+
+/** An area: the files it owns. An inner node: the files its panes show, and their areas. */
+function renderOwned(app, id) {
+  const files = app.files;
+  const n = app.nodeById.get(id);
+  const label = (x) => app.nodeById.get(x)?.label || x;
+  if (id !== UNMAPPED_ID && n?.parent != null) {
+    const paths = [...new Set((n.refs || []).filter((r) => DISPLAYABLE.has(app.refs[r.key]?.status)).map((r) => r.path))];
+    if (!paths.length) return null;
+    return section("Files", el("ul", { class: "owned" }, paths.map((p) => {
+      const area = files.ownerAt(p);
+      return el("li", {}, fileLink(app, p), area && area !== UNMAPPED_ID ?
+        el("div", { class: "small muted" }, "belongs to ", nodeLink(app, area)) :
+        el("div", { class: "small muted", text: area === UNMAPPED_ID ? "no owner yet" : "needs no owner" }));
+    })));
+  }
+  const own = files.ownedBy(id);
+  const items = [];
+  for (const path of own.whole) {
+    const given = (files.files[path]?.parts || []).filter((p) => p.node !== id);
+    items.push(el("li", {}, fileLink(app, path),
+      given.length ? el("div", { class: "small muted" }, "except ", given.map((p, i) => [i ? ", " : "",
+        el("button", { class: "link", onclick: () => app.selectFile(path, p.start) }, p.symbol),
+        ` (${label(p.node)})`])) : null));
+  }
+  for (const p of own.parts) {
+    items.push(el("li", {}, fileLink(app, p.path, p.start, `› ${p.symbol} · L${p.start}–${p.end}`)));
+  }
+  const body = items.length ? [el("ul", { class: "owned" }, items),
+    el("p", { class: "small muted", text: "Every line of code in these files is shown by an item of this area. Code no item shows is flagged as not yet explained (a validation error)." })] :
+    id === UNMAPPED_ID ? [] : [el("p", { class: "muted small", text: "Owns no files. Give it the files it is about with 'owns' (see the authoring guide)." })];
+  return section(id === UNMAPPED_ID ? "Files without an owner" : "Files", body);
+}
+
+const paneKey = (at) => at.node + (at.ref && at.ref.endsWith("#~rest") ? "|unexplained" : "");
+
+// owner colours in the file view: distinct per owner within one file, in order of appearance
+const OWNER_HUES = [210, 28, 150, 285, 350, 95, 190, 55];
+
+/** One file: its owner, the parts other nodes own, who cites it, and the code with owners. */
+function renderFile(app, path, line) {
+  const files = app.files;
+  const rec = files.files[path];
+  const label = (x) => app.nodeById.get(x)?.label || x;
+  const [dir, name] = splitPath(path);
+  const owner = files.ownerAt(path);
+  const chain = owner && owner !== UNMAPPED_ID ? app.layout.ancestors.get(owner) || [owner] : [];
+  const cited = files.cited.get(path) || [];
+  // colours: one per pane that shows lines of this file, in order of appearance
+  const colour = new Map();
+  const hueOf = (key) => {
+    if (!colour.has(key)) colour.set(key, OWNER_HUES[colour.size % OWNER_HUES.length]);
+    return colour.get(key);
+  };
+  const restKey = `${path}#~rest`;
+  const restOf = (files.rest.get(path) || []).map((rp) => rp.area);
+  const swatch = (key) => withHue(el("span", { class: "own-sw" }), hueOf(key));
+  // the panes that show this file: citing nodes, and the rest-of-file panes of areas
+  const shownIn = [
+    ...cited.filter((c) => DISPLAYABLE.has(app.refs[c.ref.key]?.status)).map((c) => ({ node: c.node, ref: c.ref.key })),
+    ...restOf.map((area) => ({ node: area, ref: restKey })),
+  ];
+  const paneLabel = (sh) => (sh.ref === restKey ? `${label(sh.node)} · not yet explained` : label(sh.node));
+  const ownerText = !rec ? "Not owned: it needs no owner (tests, docs, tooling or ignored files)." :
+    owner === UNMAPPED_ID ? "No owner yet: this code file needs one. Add it to a node's 'owns'." :
+      !owner ? "Only parts of this file are owned; the rest has no owner." : null;
+  const code = el("div", { class: "file-code", "aria-label": `Source of ${path}` },
+    el("p", { class: "muted small", text: "loading source…" }));
+  const view = el("div", { class: "insp file-view" },
+    el("div", { class: "insp-kind", text: "FILE" }),
+    el("h2", { class: "file-title" }, el("span", { class: "fl-name", text: name })),
+    el("div", { class: "insp-id" }, el("code", { class: "fl-path", text: dir + name }),
+      el("button", { class: "btn small", onclick: async () => app.toast(await copyText(path) ? "Copied path" : "Copy failed") }, "Copy path"),
+      el("button", { class: "btn small", title: "A link that opens this file in the map (#file=path:line)",
+        onclick: async () => app.toast(await copyText(location.href) ? "Copied link to this file" : "Copy failed") }, "Copy link")),
+    section("Belongs to",
+      chain.length ? el("div", { class: "owner-line" }, el("nav", { class: "insp-crumbs" },
+        chain.map((a, i) => [i ? el("span", { class: "muted", text: " › " }) : null, nodeLink(app, a)]))) : null,
+      chain.length && app.nodeById.get(owner)?.summary ? el("p", { class: "small", text: app.nodeById.get(owner).summary }) : null,
+      rec?.pattern && owner ? el("p", { class: "small muted" }, "by ", el("code", { text: `owns: ${rec.pattern}` })) : null,
+      ownerText ? el("p", { class: owner === UNMAPPED_ID ? "small warn" : "small muted", text: ownerText }) : null),
+    rec?.parts.length ? section("Parts in other areas", el("ul", { class: "owned" }, rec.parts.map((p) =>
+      el("li", {}, el("button", { class: "link mono", onclick: () => scrollToLine(view, p.start) }, p.symbol),
+        el("span", { class: "muted small", text: ` L${p.start}–${p.end} → ` }), nodeLink(app, p.node))))) : null,
+    shownIn.length ? section("Shown on the map in", el("ul", { class: "owned" }, shownIn.map((sh) => {
+      const res = sh.ref === restKey ? null : app.refs[sh.ref] || {};
+      const c = cited.find((x) => x.ref.key === sh.ref);
+      return el("li", {}, swatch(paneKey(sh)),
+        el("button", { class: "link", title: "Show this pane on the map", onclick: () => app.flyToRef(sh.node, sh.ref) }, paneLabel(sh)),
+        res ? el("span", { class: "muted small", text: ` ${c?.ref.symbol || "whole file"}${res.start ? ` · L${res.start}–${res.end}` : ""}${c?.ref.role ? ` · ${c.ref.role}` : ""}` }) : null);
+    }))) : null,
+    sourceSection(code));
+  loadFileCode(app, path, line, code, { hueOf, cited, label: (sh) => paneLabel(sh) });
+  return view;
+}
+
+/** Set an element's owner hue (through the CSSOM: the page's CSP forbids style attributes). */
+function withHue(node, h) {
+  node.style.setProperty("--h", String(h));
+  return node;
+}
+
+function sourceSection(code) {
+  return el("section", { class: "insp-sec file-src" }, el("h3", { text: "Source" }), code);
+}
+
+function scrollToLine(view, n) {
+  const row = view.querySelector(`.fc-ln[data-n="${n}"]`);
+  const box = view.querySelector(".file-code") || view.closest(".file-code");
+  if (row && box) box.scrollTop = row.offsetTop - box.clientHeight / 2;
+}
+
+async function loadFileCode(app, path, line, root, { hueOf, cited, label }) {
+  const data = await app.fetchSource(path, 1, 2000).catch((err) => ({ error: true, message: String(err) }));
+  if (app.selection?.type !== "file" || app.selection.path !== path) return; // moved on meanwhile
+  clear(root);
+  if (data.error) {
+    root.append(el("p", { class: "small warn", text: `Cannot show source: ${data.message || data.error}` }));
+    return;
+  }
+  const lang = languageOf(path);
+  const spans = cited.map((c) => ({ c, res: app.refs[c.ref.key] || {} })).filter((x) => x.res.start);
+  const table = el("div", { class: "fc" });
+  let prev, prevAt = null;
+  const name = (id) => app.nodeById.get(id)?.label || id;
+  for (let i = 0; i < data.lines.length; i++) {
+    const n = data.start + i;
+    let at = app.files.shownAt(path, n); // the pane on the map that shows this line
+    // glue (imports, blank lines, comments) needs no pane: it continues the block before it
+    if (at && !at.ref && prevAt) at = prevAt;
+    prevAt = at;
+    const key = at ? paneKey(at) : null; // one colour and label per node (it may cite several parts)
+    const citing = spans.filter((x) => x.res.start <= n && n <= x.res.end).map((x) => x.c.node);
+    if (key !== prev && at) {
+      // where the pane changes, say which pane shows the following lines
+      table.append(withHue(el("div", { class: "fc-owner" },
+        el("button", { class: "link", title: "Show this pane on the map",
+          onclick: () => (at.ref ? app.flyToRef(at.node, at.ref) : app.select({ type: "node", id: at.node }, { fly: true })) },
+        label(at))), hueOf(key)));
+    }
+    prev = key;
+    const owner = at ? key : null;
+    const tx = el("span", { class: "fc-tx" });
+    for (const [cls, t] of tokenize(data.lines[i], lang)) {
+      if (cls) tx.append(el("span", { class: "t" + cls, text: t }));
+      else tx.append(document.createTextNode(t));
+    }
+    const row = el("div", { class: "fc-ln" + (n === line ? " target" : ""), dataset: { n: String(n) } },
+      el("span", { class: owner ? "fc-own" : "fc-own none" }),
+      el("span", { class: "fc-no", text: String(n) }),
+      el("span", { class: citing.length ? "fc-cite on" : "fc-cite", title: citing.length ? "cited by " + [...new Set(citing.map(name))].join(", ") : null }),
+      tx);
+    table.append(owner ? withHue(row, hueOf(owner)) : row);
+  }
+  root.append(table);
+  if (data.end < data.total_lines) {
+    root.append(el("p", { class: "small muted", text: `Showing lines 1–${data.end} of ${data.total_lines}.` }));
+  }
+  if (line) requestAnimationFrame(() => scrollToLine(root, line));
 }
 
 function relGroup(app, title, rels, endKey) {
@@ -265,6 +457,75 @@ export function renderOutline(app, root) {
     build(app.layout.roots, tree, filter.value.trim().toLowerCase());
   });
   root.append(filter, tree);
+}
+
+/**
+ * Every file the map knows, as a folder tree: which node each file belongs to, and which code
+ * files still need an owner. Clicking a file shows it and moves the map to its owner.
+ */
+export function renderFiles(app, root) {
+  clear(root);
+  const files = app.files;
+  const c = files.counts;
+  const filter = el("input", { type: "search", class: "outline-filter", placeholder: "Filter files…", "aria-label": "Filter files" });
+  const summary = c ? el("p", { class: "small " + (files.unowned.length ? "warn" : "muted"),
+    text: files.unowned.length ? `${plural(files.unowned.length, "code file")} without an owner; ${c.owned_required} of ${c.required} have one.` :
+      `All ${plural(c.required, "code file")} have an owner. Tests, docs and tooling need none.` }) : null;
+  const tree = el("div", { class: "ftree" });
+  const label = (x) => app.nodeById.get(x)?.label || x;
+  const box = (id) => app.layout.boxes.get(id);
+  const build = (q) => {
+    clear(tree);
+    const paths = files.paths().filter((p) => !q || p.toLowerCase().includes(q));
+    // nested folders; chains of single folders are merged ("src/app/")
+    const rootDir = { dirs: new Map(), files: [] };
+    for (const p of paths) {
+      const segs = p.split("/");
+      let d = rootDir;
+      for (const seg of segs.slice(0, -1)) {
+        if (!d.dirs.has(seg)) d.dirs.set(seg, { dirs: new Map(), files: [] });
+        d = d.dirs.get(seg);
+      }
+      d.files.push(p);
+    }
+    const open = paths.length <= 400 || !!q;
+    const sel = app.selection?.type === "file" ? app.selection.path : null;
+    const render = (d, into) => {
+      for (let [name, sub] of [...d.dirs.entries()].sort()) {
+        while (!sub.files.length && sub.dirs.size === 1) {
+          const [n2, s2] = [...sub.dirs.entries()][0];
+          name += "/" + n2;
+          sub = s2;
+        }
+        const ul = el("ul", {});
+        render(sub, ul);
+        into.append(el("li", {}, el("details", { open: open ? true : null },
+          el("summary", { class: "fdir", text: name + "/" }), ul)));
+      }
+      for (const p of d.files.sort()) {
+        const owner = files.ownerAt(p);
+        const rec = files.files[p];
+        const b = owner && owner !== UNMAPPED_ID ? box(owner) : null;
+        const tag = owner === UNMAPPED_ID ? el("span", { class: "pill warn", text: "no owner" }) :
+          owner ? el("span", { class: "fowner", text: label(owner) }) :
+            rec?.parts.length ? el("span", { class: "fowner", text: "parts only" }) :
+              el("span", { class: "fowner muted", text: "cited only" });
+        const dot = el("span", { class: "fdot" + (b ? "" : " none") });
+        if (b) dot.style.background = app.renderer.strokeFor(b);
+        into.append(el("li", {}, el("button", { class: "ffile" + (p === sel ? " selected" : ""), title: p, dataset: { path: p },
+          onclick: () => app.selectFile(p) }, dot, el("span", { class: "fname", text: p.split("/").pop() }),
+        rec?.parts.length ? el("span", { class: "fsplit", title: "Parts of this file belong to other nodes", text: "◐" }) : null, tag)));
+      }
+    };
+    const ul = el("ul", { class: "ftree-root" });
+    render(rootDir, ul);
+    tree.append(ul);
+    if (!paths.length) tree.append(el("p", { class: "muted small", text: "No matching files." }));
+  };
+  build("");
+  filter.addEventListener("input", () => build(filter.value.trim().toLowerCase()));
+  root.append(filter, summary, tree,
+    el("p", { class: "small muted", text: "A file belongs to exactly one area of the map, and all of its code is shown inside that area; nodes elsewhere may cite it as evidence. ◐ marks files split between areas." }));
 }
 
 export function renderFlows(app, root) {
@@ -425,7 +686,7 @@ export function renderCoverage(app, root) {
   const refs = Object.entries(d.refs || {});
   const byStatus = new Map();
   for (const [, r] of refs) byStatus.set(r.status, (byStatus.get(r.status) || 0) + 1);
-  const unsupported = app.model.nodes.filter((n) => !(n.refs || []).length && !n.children.length &&
+  const unsupported = app.model.nodes.filter((n) => !n.synthetic && !(n.refs || []).length && !n.children.length &&
     !["planned", "unknown"].includes(n.evidence) && !["external", "actor"].includes(n.kind));
   const uncertain = app.model.nodes.filter((n) => ["needs_review", "unknown", "planned"].includes(n.evidence));
   const changed = d.git?.reviewed?.known ? app.model.nodes.filter((n) => (n.refs || []).some((r) => d.refs[r.key]?.changed_since_review)) : [];
@@ -460,12 +721,13 @@ export function renderCoverage(app, root) {
     unsupported.length ? nodeList(unsupported) : el("p", { class: "small muted", text: "Every leaf claim has a source reference or an explicit status." }),
     el("h3", { text: "Marked uncertain" }),
     uncertain.length ? nodeList(uncertain) : el("p", { class: "small muted", text: "None." }),
-    cov ? el("div", {},
-      el("h3", { text: "Repository coverage" }),
-      el("p", { class: "small", text: `${cov.referenced} of ${cov.files} files are referenced by the map${cov.truncated ? " (file list truncated)" : ""}. Unreferenced files are not necessarily unmodeled, but nothing links them to the map.` }),
+    cov && app.files.counts ? el("div", {},
+      el("h3", { text: "Files with an owner" }),
+      el("p", { class: "small", text: `${app.files.counts.owned_required} of ${plural(app.files.counts.required, "code file")} belong to a part of the map${cov.truncated ? " (file list truncated)" : ""}. Tests, docs, tooling and ignored files need no owner.` }),
+      app.files.unowned.length ? el("ul", { class: "owned" }, app.files.unowned.slice(0, 100).map((p) => el("li", {}, fileLink(app, p)))) : null,
       el("table", { class: "cov" }, el("tbody", {}, cov.by_dir.map((r) => el("tr", {},
         el("td", { class: "mono small", text: r.dir }),
-        el("td", { class: "small num", text: `${r.referenced}/${r.files}` }),
-        el("td", {}, el("div", { class: "bar" }, el("div", { class: "fill", dataset: { pct: Math.round(100 * r.referenced / Math.max(1, r.files)) } })))))))) : null));
+        el("td", { class: "small num", text: `${r.owned}/${r.files}` }),
+        el("td", {}, el("div", { class: "bar" }, el("div", { class: "fill", dataset: { pct: Math.round(100 * r.owned / Math.max(1, r.files)) } })))))))) : null));
   for (const fill of root.querySelectorAll(".bar .fill")) fill.style.width = fill.dataset.pct + "%";
 }

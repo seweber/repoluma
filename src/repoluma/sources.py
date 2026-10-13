@@ -562,19 +562,19 @@ def list_files(root: Path, repo: Repository, limit: int = 50_000) -> tuple[list[
     return sorted(files)[:limit], truncated
 
 
-def coverage(files: list[str], referenced: set[str], depth: int = 2) -> list[dict[str, Any]]:
-    """Per-directory counts of files and referenced files (honest 'unmodeled' signal)."""
+def coverage(files: dict[str, dict[str, Any]], depth: int = 2) -> list[dict[str, Any]]:
+    """Per-directory counts of files that must have an owner, and of those that have one."""
     groups: dict[str, list[int]] = {}
-    for f in files:
-        if f.startswith(".repoluma/"):
+    for f, rec in files.items():
+        if not rec["required"]:
             continue
         parts = f.split("/")
         key = "/".join(parts[: min(depth, len(parts) - 1)]) or "(root files)"
         g = groups.setdefault(key, [0, 0])
         g[0] += 1
-        if f in referenced:
+        if rec["owner"] is not None:
             g[1] += 1
     return [
-        {"dir": k, "files": v[0], "referenced": v[1]}
+        {"dir": k, "files": v[0], "owned": v[1]}
         for k, v in sorted(groups.items(), key=lambda kv: kv[0])
     ]

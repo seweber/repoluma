@@ -5,8 +5,11 @@ import { TUNING } from "./arrange.js";
 import { computeLayout, relText, worldRect } from "./layout.js";
 import { PaneLayer, SourceCache } from "./panes.js";
 import { Renderer, readTheme } from "./render.js";
-import { computeImpact, renderCoverage, renderFilters, renderFlowBar, renderFlows, renderInspector, renderMapLegend, renderOutline } from "./ui.js";
+import { FileIndex, UNMAPPED_ID } from "./files.js";
+import { computeImpact, renderCoverage, renderFiles, renderFilters, renderFlowBar, renderFlows, renderInspector, renderMapLegend, renderOutline } from "./ui.js";
 import { clamp, clear, copyText, debounce, el, plural } from "./util.js";
+
+const UNMAPPED_PANES = 24; // code panes in the "not yet mapped" region at most
 
 const TOKEN = document.querySelector('meta[name="repoluma-token"]').content;
 
@@ -69,6 +72,7 @@ class App {
     const anchor = this.captureAnchor();
     this.model = data.model;
     this.refs = data.refs;
+    this.indexFiles(data.ownership);
     this.index();
     const t0 = performance.now();
     this.layout = computeLayout(this.model, this.refs, (font, text) => this.measure(font, text));
@@ -94,13 +98,15 @@ class App {
     if (status) {
       const changed = new Set();
       for (const [p, tok] of Object.entries(status.tokens)) if (prevTokens[p] && prevTokens[p] !== tok) changed.add(p);
+      const listing = changed.delete("__files__");
       if (reason !== "initial") this.sources.invalidate(changed.size ? changed : null);
       this.tokens = status.tokens;
       this.digest = status.digest;
       if (reason === "poll") {
         const files = [...changed].filter((p) => p !== "__map__");
         this.toast(changed.has("__map__") ? "Map changed: reloaded" + (files.length ? ` (and ${plural(files.length, "source file")})` : "") :
-          files.length ? `Source changed: ${files.slice(0, 3).join(", ")}${files.length > 3 ? "…" : ""}` : "Reloaded");
+          files.length ? `Source changed: ${files.slice(0, 3).join(", ")}${files.length > 3 ? "…" : ""}` :
+            listing ? "Files added or removed: ownership updated" : "Reloaded");
       }
     }
     this.renderChrome();
@@ -115,6 +121,35 @@ class App {
     this.panes.reset();
     this.requestRender();
     return this.perf.layoutMs;
+  }
+
+  /**
+   * Index which node owns which file, add the "Not yet mapped" region for code files without
+   * an owner, and give every node the short list of files its header shows.
+   */
+  indexFiles(ownership) {
+    const m = this.model;
+    this.files = new FileIndex(ownership, m, this.refs);
+    const n = this.files.unowned.length;
+    if (n) {
+      m.nodes.push({ id: UNMAPPED_ID, label: "Not yet mapped", kind: "unmapped", parent: null, depth: 0,
+        summary: `${plural(n, "code file")} ${n === 1 ? "has" : "have"} no owner in the map yet. Give each to ` +
+          "the node it belongs to with 'owns', or list it under source.ownership.ignore.",
+        refs: [], owns: [], children: [], tags: [], synthetic: true });
+    }
+    // files are named on the outermost boxes; inside, the panes' captions name them
+    const byId = new Map(m.nodes.map((node) => [node.id, node]));
+    for (const node of m.nodes) {
+      node.fileItems = node.parent == null ? this.files.lineItems(node.id) : [];
+      node.restPanes = [];
+    }
+    for (const rp of ownership?.rest || []) byId.get(rp.area)?.restPanes.push(rp);
+    // "not yet mapped" is a to-do list: a few files' code, the rest listed in its inspector
+    const todo = byId.get(UNMAPPED_ID);
+    if (todo && todo.restPanes.length > UNMAPPED_PANES) {
+      todo.summary += ` The code of the first ${UNMAPPED_PANES} is shown here; all are listed in the Files tab.`;
+      todo.restPanes = todo.restPanes.slice(0, UNMAPPED_PANES);
+    }
   }
 
   index() {
@@ -148,6 +183,7 @@ class App {
 
   recordExists(sel) {
     if (sel.type === "bundle") return sel.ids.every((id) => this.relById.has(id));
+    if (sel.type === "file") return !!this.files.files[sel.path] || this.files.cited.has(sel.path);
     return sel.type === "node" ? this.nodeById.has(sel.id) : this.relById.has(sel.id);
   }
 
@@ -218,14 +254,34 @@ class App {
   }
 
   // ------------------------------------------------------- selection
+  /** Fetch lines of a file the map owns or cites (used by the file view). */
+  fetchSource(path, start, end) {
+    return api(`/api/source?path=${encodeURIComponent(path)}&start=${start}&end=${end}`);
+  }
+
   select(sel, opts = {}) {
     this.selection = sel;
+    document.body.classList.toggle("file-open", sel?.type === "file");
+    if (this.tab === "files") {
+      for (const b of document.querySelectorAll(".ffile")) b.classList.toggle("selected", sel?.type === "file" && b.dataset.path === sel.path);
+    }
     if (opts.fly && sel?.type === "node") this.flyToNode(sel.id);
     renderInspector(this, this.$("#inspector-body"));
     this.$("#inspector").classList.toggle("empty", !sel);
     if (this.tab === "outline") this.markOutlineSelection();
     this.requestRender();
     this.updateHash();
+  }
+
+  /** Show a file (and which pane shows each line) and move the map to its area. */
+  selectFile(path, line = null, opts = { fly: true }) {
+    if (!this.files.files[path] && !this.files.cited.has(path)) {
+      this.toast(`${path} is not owned or cited by the map`);
+      return;
+    }
+    this.select({ type: "file", path, line });
+    const owner = this.files.ownerAt(path, line) || this.files.cited.get(path)?.[0]?.node;
+    if (opts.fly && owner && this.layout.boxes.has(owner)) this.flyToNode(owner);
   }
 
   selectRecord(id) {
@@ -417,6 +473,7 @@ class App {
     }
     renderInspector(this, this.$("#inspector-body"));
     this.$("#inspector").classList.toggle("empty", !this.selection);
+    document.body.classList.toggle("file-open", this.selection?.type === "file");
     this.renderTab();
   }
 
@@ -433,7 +490,7 @@ class App {
 
   renderTab() {
     if (!this.model) return;
-    const fn = { outline: renderOutline, flows: renderFlows, filters: renderFilters, coverage: renderCoverage }[this.tab];
+    const fn = { outline: renderOutline, files: renderFiles, flows: renderFlows, filters: renderFilters, coverage: renderCoverage }[this.tab];
     fn(this, this.$("#tab-" + this.tab));
   }
 
@@ -527,7 +584,9 @@ class App {
     const c = this.camera;
     const p = new URLSearchParams();
     p.set("c", [c.x, c.y, c.z].map((v) => +v.toPrecision(6)).join(","));
-    if (this.selection && this.selection.type !== "bundle") p.set("s", (this.selection.type === "relationship" ? "r:" : "") + this.selection.id);
+    const sel = this.selection;
+    if (sel?.type === "file") p.set("file", sel.path + (sel.line ? ":" + sel.line : ""));
+    else if (sel && sel.type !== "bundle") p.set("s", (sel.type === "relationship" ? "r:" : "") + sel.id);
     if (this.flow) p.set("f", `${this.flow.id},${this.flowStep}`);
     if (this.hiddenRelTypes.size) p.set("hr", [...this.hiddenRelTypes].join(","));
     if (this.hiddenNodeKinds.size) p.set("hk", [...this.hiddenNodeKinds].join(","));
@@ -550,6 +609,12 @@ class App {
       const sel = s.startsWith("r:") ? { type: "relationship", id: s.slice(2) } : { type: "node", id: s };
       if (this.recordExists(sel)) this.selection = sel;
     }
+    const file = p.get("file");
+    if (file) {
+      const m = /^(.*?)(?::(\d+))?$/.exec(file);
+      const sel = { type: "file", path: m[1], line: m[2] ? +m[2] : null };
+      if (this.recordExists(sel)) this.selection = sel;
+    }
     const f = p.get("f");
     if (f) {
       const [fid, step] = f.split(",");
@@ -559,6 +624,16 @@ class App {
     if (c.length === 3 && c.every(Number.isFinite) && c[2] > 0) {
       this.camera.set({ x: c[0], y: c[1], z: c[2] }, false);
       return true;
+    }
+    if (this.selection?.type === "file") {
+      // a link from an editor (#file=path:line) has no view yet: show the owner
+      const s = this.selection;
+      const owner = this.files.ownerAt(s.path, s.line) || this.files.cited.get(s.path)?.[0]?.node;
+      const box = owner && this.layout.boxes.get(owner);
+      if (box) {
+        this.camera.set(this.camera.fitState(worldRect(box), 0.08, this.insets()), false);
+        return true;
+      }
     }
     return false;
   }
@@ -750,6 +825,11 @@ class App {
       if (this.selection) this.select(null);
       return;
     }
+    if (hit.type === "caption") {
+      this.panes.deactivate();
+      this.selectFile(hit.path, hit.line, { fly: false });
+      return;
+    }
     if (hit.type === "pane") {
       const pane = this.layout.panes.get(hit.id);
       if (this.selection?.id !== pane.nodeId) this.select({ type: "node", id: pane.nodeId });
@@ -769,12 +849,10 @@ class App {
       const { sx: x, sy: y, ev: e } = this.hoverPending;
       this.hoverPending = null;
       const hit = this.renderer.hitTest(x, y);
-      const id = hit?.type === "node" ? hit.id : hit?.type === "pane" ? null : null;
-      if (id !== this.hover) {
-        this.hover = id;
-        this.stage.style.cursor = hit ? "pointer" : "";
-        this.requestRender();
-      }
+      const id = hit?.type === "node" ? hit.id : null;
+      if (id !== this.hover) this.requestRender();
+      this.hover = id;
+      this.stage.style.cursor = hit ? "pointer" : "";
       this.showTip(hit, e);
     });
   }
@@ -906,6 +984,13 @@ class App {
         ...(n.refs || []).map((r) => score(r.key, 8)));
       if (s) out.push({ type: "node", id: n.id, label: n.label, kind: n.kind, sub: n.id, s });
     }
+    for (const path of this.files.paths()) {
+      const s = Math.max(score(path, 7), score(path.split("/").pop(), 12));
+      if (!s) continue;
+      const owner = this.files.ownerAt(path);
+      out.push({ type: "file", id: path, label: path, kind: "file",
+        sub: owner ? this.nodeById.get(owner)?.label : "no owner", s });
+    }
     for (const f of this.model.flows) {
       const s = Math.max(score(f.label, 28), score(f.id, 18));
       if (s) out.push({ type: "flow", id: f.id, label: f.label, kind: "flow", s });
@@ -922,11 +1007,18 @@ class App {
     this.closeSearch();
     if (r.type === "node") this.select({ type: "node", id: r.id }, { fly: true });
     else if (r.type === "flow") this.setFlow(r.id, 0);
+    else if (r.type === "file") this.selectFile(r.id);
     else this.select({ type: "relationship", id: r.id });
   }
 
   // ------------------------------------------------------- agent export
   agentSummary(id) {
+    if (id === UNMAPPED_ID) {
+      return [`repoluma: ${plural(this.files.unowned.length, "code file")} without an owner in ${this.data.map_path}:`,
+        ...this.files.unowned.map((p) => `  - ${p}`),
+        "Give each to the node it belongs to with 'owns' (see `repoluma guide`), or list it under source.ownership.ignore.",
+        `View: ${location.href}`].join("\n");
+    }
     const n = this.nodeById.get(id);
     const d = this.data;
     const chain = this.layout.ancestors.get(id).map((a) => `${this.nodeById.get(a).label} (\`${a}\`)`).join(" › ");
@@ -939,6 +1031,12 @@ class App {
     if (n.details) lines.push(`Details: ${n.details}`);
     if (n.contract) {
       for (const [k, v] of Object.entries(n.contract)) if (v.length) lines.push(`${k[0].toUpperCase() + k.slice(1)}: ${v.join("; ")}`);
+    }
+    const own = this.files.ownedBy(id);
+    if (own.whole.length || own.parts.length) {
+      lines.push("Owns (files that belong to this part of the map):");
+      for (const p of own.whole) lines.push(`  - ${p}`);
+      for (const p of own.parts) lines.push(`  - ${p.path}#${p.symbol} (lines ${p.start}-${p.end})`);
     }
     if ((n.refs || []).length) {
       lines.push("Source:");
