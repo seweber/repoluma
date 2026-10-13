@@ -15,7 +15,13 @@ validates that description against the real code and serves a local, zoomable ma
 - **Zoom further**: the referenced implementation and tests appear *inside the map*,
   read live from your working tree, with line numbers, freshness, and resolution status.
 - **Follow the data**: relationships are data (labelled with what moves, arrow from source
-  to destination), control, or dependency, explained by a legend on the map.
+  to destination), control, or dependency, explained by a legend on the map. A call and what
+  comes back are one *exchange* (input, result, error), and lines always connect the items
+  that do the work, never the regions that group them.
+- **See where it happens**: click a line or its label to inspect that one direction: its
+  exchange, and the code where the data is handed over and taken in, with the cited text
+  highlighted (the view stays put). Certainty, whether the cited text was found, and
+  whether it changed since review are shown separately. A line without a cited site says so.
 - **Find every file's place**: each code file belongs to exactly one area of the map
   (`owns` on top-level nodes), each area names its files, and every line of code must be
   shown by a node of its area (`validate` fails on code no node explains; the viewer
@@ -24,8 +30,9 @@ validates that description against the real code and serves a local, zoomable ma
   `repoluma where path:line`) you reach its area and the pane showing each line. Code
   files without an owner show up as "not yet mapped".
 - **Follow a flow** step by step across responsibilities, including what happens on failure.
-- **Stay honest**: unresolved references, uncertain claims, unmodeled directories, and
-  hidden-by-filter counts are shown, not hidden.
+- **Stay honest**: unresolved references, uncertain claims, unmodeled directories, code
+  covered only by a whole-file or whole-class reference (and code added there since the
+  map was reviewed), and hidden-by-filter counts are shown, not hidden.
 - **Talk to your agent**: stable ids, view links, and a "copy for agent" summary of any selection.
 
 There is no embedded LLM, no API key, and no build step for users. The viewer never
@@ -71,10 +78,11 @@ opens a small fictional shop with a complete map.
 
 | command | what it does |
 | --- | --- |
-| `repoluma init` | Create a placeholder map if none exists (never overwrites) and print an agent prompt. |
+| `repoluma init` | Create a placeholder map if none exists (never overwrites), print an agent prompt and copy it to the clipboard (`--no-copy` to skip). |
 | `repoluma prompt` | Print the agent prompt again. |
 | `repoluma guide` | Print the authoring guide for agents (matches this version). `--format skill --write DIR` exports it as a `SKILL.md` for agents that use skills. Nothing is installed into agent configuration automatically. |
 | `repoluma schema` | Print the JSON Schema of the map format. |
+| `repoluma migrate` | Move a `schema_version: 2` map to version 3: does the mechanical part into `<map>.v3.yaml` (`--in-place` to overwrite) and lists the decisions that need the code. |
 | `repoluma validate` | Check the map, resolve every source reference, and check that every code file has exactly one owner. `--json` for machine-readable diagnostics, `--strict` to fail on warnings. Exit status 1 on errors. |
 | `repoluma where PATH[:LINE]` | Which area owns a file (or one line of it), which pane shows that line, and which nodes cite it. `--json`; exit status 1 if it has no owner. |
 | `repoluma serve` | Serve the viewer on loopback. `--root`, `--map`, `--port`, `--no-open`. |
@@ -87,16 +95,20 @@ opens a small fictional shop with a complete map.
 | wheel / pinch | zoom around the pointer |
 | drag, arrow keys | pan (zoom level is kept, so neighbouring regions show the same depth) |
 | click / double-click | select and inspect / zoom to it |
+| click a line or its label | inspect that direction and its cited code; the other legs of its exchange are highlighted |
 | click a code pane | activate it: the wheel scrolls code and text is selectable; `Esc` releases |
 | `/` | search labels, ids, summaries, file paths |
 | `0`, `b`, `u` | whole map, back, select the containing item |
 | `n` / `p` | next / previous step of the active flow |
-| `c` | copy the selection as text for a coding agent |
+| `c` | copy the selection (an item or a line) as text for a coding agent |
+| `[` | back to the previous selection |
 
 The left panel has an **Outline** (keyboard-accessible tree), **Files** (every file and
-the node it belongs to), **Flows**, **Layers** (relationship types, node kinds, tags,
-uncertainty highlighting, legend), and **Coverage** (diagnostics, reference status,
-changed-since-review, claims without evidence, files without an owner). Clicking a file,
+the node it belongs to), **Lines** (every relationship, exchanges first, so each line is
+reachable by keyboard even when its label does not fit), **Flows**, **Layers**
+(relationship types, node kinds, tags, uncertainty highlighting, legend), and **Coverage**
+(diagnostics, reference status, changed-since-review, data lines without a cited site,
+code covered only broadly, claims without evidence, files without an owner). Clicking a file,
 or the file name above a code pane, shows the whole file and which pane on the map shows each line. The URL always encodes the current view, selection,
 flow step, and filters.
 

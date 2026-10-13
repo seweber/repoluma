@@ -26,7 +26,8 @@
     "UV_PROJECT_ENVIRONMENT": "/home/vscode/.venv",
     "UV_CACHE_DIR": "/home/vscode/.persist/uv-cache",
     "UV_LINK_MODE": "copy",
-    "VIRTUAL_ENV": "/home/vscode/.venv"
+    "VIRTUAL_ENV": "/home/vscode/.venv",
+    "PLAYWRIGHT_BROWSERS_PATH": "/home/vscode/.persist/ms-playwright"
   },
 
   "postCreateCommand": "bash .devcontainer/post-create.sh",

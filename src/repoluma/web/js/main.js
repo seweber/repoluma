@@ -6,7 +6,7 @@ import { computeLayout, relText, worldRect } from "./layout.js";
 import { PaneLayer, SourceCache } from "./panes.js";
 import { Renderer, readTheme } from "./render.js";
 import { FileIndex, UNMAPPED_ID } from "./files.js";
-import { computeImpact, renderCoverage, renderFiles, renderFilters, renderFlowBar, renderFlows, renderInspector, renderMapLegend, renderOutline } from "./ui.js";
+import { computeImpact, renderConnections, renderCoverage, renderFiles, renderFilters, renderFlowBar, renderFlows, renderInspector, renderMapLegend, renderOutline } from "./ui.js";
 import { clamp, clear, copyText, debounce, el, plural } from "./util.js";
 
 const UNMAPPED_PANES = 24; // code panes in the "not yet mapped" region at most
@@ -19,6 +19,13 @@ async function api(path) {
   return res.json();
 }
 
+function sameSelection(a, b) {
+  if (!a || !b || a.type !== b.type) return false;
+  if (a.type === "file") return a.path === b.path && a.line === b.line;
+  if (a.type === "bundle") return a.ids.join() === b.ids.join();
+  return a.id === b.id;
+}
+
 class App {
   constructor() {
     this.$ = (sel) => document.querySelector(sel);
@@ -29,7 +36,9 @@ class App {
     this.sources = new SourceCache(api, () => this.requestRender());
     this.panes = new PaneLayer(this.$("#panes"), this);
     this.selection = null;
+    this.selHistory = []; // earlier selections, for "back" in the inspector
     this.hover = null;
+    this.hoverRel = null;
     this.flow = null;
     this.flowStep = 0;
     this.hiddenRelTypes = new Set();
@@ -84,7 +93,8 @@ class App {
     const fit = this.camera.fitState(b, 0.05, this.insets());
     this.camera.minZ = fit.z / 3;
     this.camera.maxZ = 4 / this.layout.minScale;
-    if (this.selection && !this.recordExists(this.selection)) this.selection = null;
+    // a selection that no longer exists stays selected, so the inspector can say so
+    if (this.selection) this.selection.missing = !this.recordExists(this.selection);
     if (this.flow) this.flow = this.flowById.get(this.flow.id) || null;
     if (this.flow) this.flowStep = clamp(this.flowStep, 0, this.flow.steps.length - 1);
     this.panes.reset();
@@ -156,6 +166,7 @@ class App {
     const m = this.model;
     this.nodeById = new Map(m.nodes.map((n) => [n.id, n]));
     this.relById = new Map(m.relationships.map((r) => [r.id, r]));
+    this.exchangeById = new Map((m.exchanges || []).map((x) => [x.id, x]));
     this.flowById = new Map(m.flows.map((f) => [f.id, f]));
     this.outgoing = new Map();
     this.incoming = new Map();
@@ -166,6 +177,12 @@ class App {
       this.incoming.get(r.to).push(r);
     }
     this.descCache = new Map();
+  }
+
+  /** The legs of the exchange a relationship belongs to (just itself when it has none). */
+  exchangeLegs(relId) {
+    const x = this.exchangeById?.get(this.relById.get(relId)?.exchange);
+    return x ? x.legs : [relId];
   }
 
   descendants(id) {
@@ -260,6 +277,11 @@ class App {
   }
 
   select(sel, opts = {}) {
+    const prev = this.selection;
+    if (prev && !prev.missing && !opts.back && !sameSelection(prev, sel)) {
+      this.selHistory.push(prev);
+      if (this.selHistory.length > 30) this.selHistory.shift();
+    }
     this.selection = sel;
     document.body.classList.toggle("file-open", sel?.type === "file");
     if (this.tab === "files") {
@@ -269,8 +291,24 @@ class App {
     renderInspector(this, this.$("#inspector-body"));
     this.$("#inspector").classList.toggle("empty", !sel);
     if (this.tab === "outline") this.markOutlineSelection();
+    if (this.tab === "connections") {
+      for (const b of document.querySelectorAll(".conn-item")) {
+        const on = sel?.type === "relationship" && b.dataset.id === sel.id;
+        b.classList.toggle("selected", on);
+        if (on) b.scrollIntoView({ block: "nearest" });
+      }
+    }
     this.requestRender();
     this.updateHash();
+  }
+
+  /** Return to the previous selection (the inspector's back button). */
+  selectBack() {
+    while (this.selHistory.length) {
+      const prev = this.selHistory.pop();
+      if (this.recordExists(prev)) { this.select(prev, { back: true }); return true; }
+    }
+    return false;
   }
 
   /** Show a file (and which pane shows each line) and move the map to its area. */
@@ -372,6 +410,15 @@ class App {
   flyToRect(rect, padding = 0.08) {
     this.pushHistory();
     this.camera.flyTo(this.camera.fitState(rect, padding, this.insets()));
+  }
+
+  /** Frame both ends of a relationship (the inspector's "Show ends"). */
+  flyToRelationship(id) {
+    const r = this.relById.get(id);
+    const rects = r ? [r.from, r.to].filter((x) => this.layout.boxes.has(x)).map((x) => worldRect(this.layout.boxes.get(x))) : [];
+    if (!rects.length) return;
+    const x = Math.min(...rects.map((q) => q.x)), y = Math.min(...rects.map((q) => q.y));
+    this.flyToRect({ x, y, w: Math.max(...rects.map((q) => q.x + q.w)) - x, h: Math.max(...rects.map((q) => q.y + q.h)) - y }, 0.2);
   }
 
   flyToNode(id) {
@@ -490,7 +537,7 @@ class App {
 
   renderTab() {
     if (!this.model) return;
-    const fn = { outline: renderOutline, files: renderFiles, flows: renderFlows, filters: renderFilters, coverage: renderCoverage }[this.tab];
+    const fn = { outline: renderOutline, files: renderFiles, connections: renderConnections, flows: renderFlows, filters: renderFilters, coverage: renderCoverage }[this.tab];
     fn(this, this.$("#tab-" + this.tab));
   }
 
@@ -607,7 +654,9 @@ class App {
     const s = p.get("s");
     if (s) {
       const sel = s.startsWith("r:") ? { type: "relationship", id: s.slice(2) } : { type: "node", id: s };
-      if (this.recordExists(sel)) this.selection = sel;
+      // a link to a record that is gone still opens: the inspector says what happened
+      sel.missing = !this.recordExists(sel);
+      this.selection = sel;
     }
     const file = p.get("file");
     if (file) {
@@ -651,7 +700,7 @@ class App {
 1. Run \`${cmd} guide\` and follow those instructions exactly.
 2. Write the map to ${data.map_path}, describing what the software does before how files are organized.
 3. Run \`${cmd} validate\` and fix every error; re-run until it passes.
-4. Tell me what you covered, what you left out, and which claims need review.`;
+4. Tell me what you covered, what you left out, which claims need review, and which data lines you could not point at code.`;
     body.append(
       el("h2", { text: missing ? "No map yet" : "The map could not be read" }),
       missing ? el("p", {}, "repoluma shows a map that your coding agent writes to ", el("code", { text: data.map_path }), ". Nothing is generated automatically and no model provider is needed.") :
@@ -753,7 +802,7 @@ class App {
     };
     this.stage.addEventListener("pointerup", end);
     this.stage.addEventListener("pointercancel", end);
-    this.stage.addEventListener("pointerleave", () => { this.hover = null; this.hideTip(); this.requestRender(); });
+    this.stage.addEventListener("pointerleave", () => { this.hover = null; this.hoverRel = null; this.hideTip(); this.requestRender(); });
     this.stage.addEventListener("dblclick", (ev) => {
       if (this.panes.isActiveBody(ev.target)) return;
       const r = this.stage.getBoundingClientRect();
@@ -814,6 +863,7 @@ class App {
     const r = this.stage.getBoundingClientRect();
     const route = paneId ? null : this.renderer.hitRoute(ev.clientX - r.left, ev.clientY - r.top);
     if (route) {
+      // the camera stays where it is: the inspector shows the line's evidence
       this.panes.deactivate();
       if (route.members.length === 1) this.select({ type: "relationship", id: route.members[0].id });
       else this.select({ type: "bundle", ids: route.members.map((m) => m.id) });
@@ -848,12 +898,16 @@ class App {
     requestAnimationFrame(() => {
       const { sx: x, sy: y, ev: e } = this.hoverPending;
       this.hoverPending = null;
-      const hit = this.renderer.hitTest(x, y);
+      const route = this.panes.paneAt(e.target) ? null : this.renderer.hitRoute(x, y);
+      const relId = route && route.members.length === 1 ? route.members[0].id : null;
+      const hit = route ? null : this.renderer.hitTest(x, y);
       const id = hit?.type === "node" ? hit.id : null;
-      if (id !== this.hover) this.requestRender();
+      if (id !== this.hover || relId !== this.hoverRel) this.requestRender();
       this.hover = id;
-      this.stage.style.cursor = hit ? "pointer" : "";
-      this.showTip(hit, e);
+      this.hoverRel = relId;
+      this.stage.style.cursor = hit || route ? "pointer" : "";
+      if (route) this.showRouteTip(route, e);
+      else this.showTip(hit, e);
     });
   }
 
@@ -869,6 +923,30 @@ class App {
       tip.append(el("div", { class: "tip-kind", text: n.kind }), el("strong", { text: n.label }),
         n.summary ? el("div", { class: "small", text: n.summary }) : null);
       tip.dataset.id = n.id;
+    }
+    tip.hidden = false;
+    const r = this.stage.getBoundingClientRect();
+    tip.style.left = Math.min(ev.clientX - r.left + 14, r.width - 300) + "px";
+    tip.style.top = (ev.clientY - r.top + 16) + "px";
+  }
+
+  /** A line under the pointer: its true endpoints (at overview a line ends on a region). */
+  showRouteTip(route, ev) {
+    const tip = this.$("#tip");
+    const key = "r:" + route.members.map((m) => m.id).join(",");
+    if (tip.dataset.id !== key) {
+      clear(tip);
+      const label = (x) => this.nodeById.get(x)?.label || x;
+      const shown = route.members.slice(0, 4);
+      for (const m of shown) {
+        const r = m.rel;
+        tip.append(el("div", {}, el("span", { class: "tip-kind", text: r.type + (r.leg ? ` · ${r.leg}` : "") }), " ",
+          el("strong", { text: relText(r) }),
+          el("div", { class: "small", text: `${label(r.from)} → ${label(r.to)}` })));
+      }
+      if (route.members.length > shown.length) tip.append(el("div", { class: "small muted", text: `and ${route.members.length - shown.length} more` }));
+      tip.append(el("div", { class: "small muted", text: "click to inspect" }));
+      tip.dataset.id = key;
     }
     tip.hidden = false;
     const r = this.stage.getBoundingClientRect();
@@ -916,8 +994,10 @@ class App {
       "p": () => this.stepFlow(-1),
       "u": () => { this.parentOfSelection(); },
       "c": async () => {
-        if (this.selection?.type === "node") this.toast(await copyText(this.agentSummary(this.selection.id)) ? "Copied selection for your agent" : "Copy failed");
+        const text = this.selectionSummary();
+        if (text) this.toast(await copyText(text) ? "Copied selection for your agent" : "Copy failed");
       },
+      "[": () => this.selectBack(),
     }[ev.key];
     if (handled) {
       if (ev.target.closest && ev.target.closest("button") && ev.key === "Enter") return;
@@ -1012,6 +1092,46 @@ class App {
   }
 
   // ------------------------------------------------------- agent export
+  selectionSummary() {
+    const sel = this.selection;
+    if (!sel || sel.missing) return null;
+    if (sel.type === "node") return this.agentSummary(sel.id);
+    if (sel.type === "relationship") return this.relationshipSummary(sel.id);
+    return null;
+  }
+
+  /** A relationship for an agent: endpoints, exchange, and its cited sites with their status. */
+  relationshipSummary(id) {
+    const r = this.relById.get(id);
+    const d = this.data;
+    const label = (x) => `${this.nodeById.get(x)?.label || x} (\`${x}\`)`;
+    const lines = [`repoluma relationship: \`${r.id}\` — ${r.type}${r.kind ? " " + r.kind : ""}: ${relText(r)} [${r.certainty || "certainty not stated"}]`];
+    const g = d.git || {};
+    lines.push(`Map: ${d.map_path}:${r.line || "?"}` + (g.head ? ` @ ${g.head.slice(0, 12)}${g.dirty?.length ? " (uncommitted changes present)" : ""}` : ""));
+    lines.push(`From ${label(r.from)} to ${label(r.to)}`);
+    if (r.summary) lines.push(`Summary: ${r.summary}`);
+    const x = this.exchangeById.get(r.exchange);
+    if (x) {
+      lines.push(`Exchange \`${x.id}\` (${r.leg}); legs: ` + x.legs.map((l) => {
+        const o = this.relById.get(l);
+        return `${l} (${o.leg}: ${relText(o)})`;
+      }).join(", "));
+    }
+    if (r.notes) lines.push(`Notes: ${r.notes}`);
+    if ((r.refs || []).length) {
+      lines.push("Evidence:");
+      for (const ref of r.refs) {
+        const res = this.refs[ref.key] || {};
+        const anchors = (ref.anchors || []).map((a) => `"${a.text}" ${a.status}${a.start ? ` at line ${a.start}` : ""}`).join("; ");
+        lines.push(`  - ${ref.role || "ref"}: ${ref.key}${res.start ? ` (lines ${res.start}-${res.end})` : ""} [${res.status}]${anchors ? ` focus ${anchors}` : ""}`);
+      }
+    } else {
+      lines.push("Evidence: none cited");
+    }
+    lines.push(`View: ${location.href}`);
+    return lines.join("\n");
+  }
+
   agentSummary(id) {
     if (id === UNMAPPED_ID) {
       return [`repoluma: ${plural(this.files.unowned.length, "code file")} without an owner in ${this.data.map_path}:`,
@@ -1023,7 +1143,7 @@ class App {
     const d = this.data;
     const chain = this.layout.ancestors.get(id).map((a) => `${this.nodeById.get(a).label} (\`${a}\`)`).join(" › ");
     const lines = [];
-    lines.push(`repoluma selection: \`${n.id}\` — ${n.label} [${n.kind}${n.evidence ? ", " + n.evidence : ""}]`);
+    lines.push(`repoluma selection: \`${n.id}\` — ${n.label} [${n.kind}${n.certainty ? ", " + n.certainty : ""}]`);
     const g = d.git || {};
     lines.push(`Map: ${d.map_path}:${n.line || "?"}` + (g.head ? ` @ ${g.head.slice(0, 12)}${g.dirty?.length ? " (uncommitted changes present)" : ""}` : ""));
     lines.push(`Location: ${chain}`);
@@ -1045,7 +1165,7 @@ class App {
         lines.push(`  - ${r.key}${res.start ? ` (lines ${res.start}-${res.end})` : ""} [${res.status}]${r.role ? " " + r.role : ""}`);
       }
     }
-    const rel = (r, dir) => `  - ${r.type} ${dir === "out" ? "→" : "←"} ${dir === "out" ? r.to : r.from}: ${relText(r)}${r.type !== "data" && r.label ? ` (${r.label})` : ""}${r.evidence ? ` [${r.evidence}]` : ""}`;
+    const rel = (r, dir) => `  - ${r.type} ${dir === "out" ? "→" : "←"} ${dir === "out" ? r.to : r.from}: ${relText(r)}${r.type !== "data" && r.type !== "error" && r.label ? ` (${r.label})` : ""}${r.certainty ? ` [${r.certainty}]` : ""}`;
     const out = this.outgoing.get(id) || [], inc = this.incoming.get(id) || [];
     if (out.length || inc.length) {
       lines.push("Relationships:");

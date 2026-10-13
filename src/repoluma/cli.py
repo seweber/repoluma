@@ -1,4 +1,4 @@
-"""Command-line interface: init, validate, where, serve, guide, schema, example, prompt."""
+"""Command-line interface: init, validate, where, serve, guide, schema, migrate, example, prompt."""
 
 from __future__ import annotations
 
@@ -37,7 +37,7 @@ Please build a repoluma map of this repository.
 1. Run `{cmd} guide` and follow those instructions exactly (they match the installed version).
 2. Write the map to {map_path}, describing what the software does before how files are organized.
 3. Run `{cmd} validate` and fix every error; re-run until it passes.
-4. Tell me what you covered, what you left out, and which claims need review.
+4. Tell me what you covered, what you left out, which claims need review, and which data lines you could not point at code.
 """
 
 
@@ -91,17 +91,61 @@ def cmd_init(args) -> int:
                 "# generated caches and local state; the map itself is tracked\ncache/\n",
                 encoding="utf-8",
             )
+    prompt = AGENT_PROMPT.format(cmd=cmd, map_path=ws.map_display)
+    copied = None if args.no_copy or not sys.stdout.isatty() else copy_to_clipboard(prompt)
     print()
-    print("Next: give your coding agent this prompt (copy it):")
+    if copied == "terminal":
+        print("Next: give your coding agent this prompt (your terminal was asked to copy it to "
+              "the clipboard; if pasting does not work, copy it from here):")
+    elif copied:
+        print(f"Next: give your coding agent this prompt (copied to the clipboard with {copied}):")
+    else:
+        print("Next: give your coding agent this prompt (copy it):")
     print()
-    print(_indent(AGENT_PROMPT.format(cmd=cmd, map_path=ws.map_display)))
+    print(prompt)
     print(f"Then view the result with:  {cmd} serve")
     print(f"(Optional) export the guide as an agent skill:  {cmd} guide --write <path>")
     return 0
 
 
-def _indent(text: str) -> str:
-    return "\n".join("    " + line if line else "" for line in text.splitlines()) + "\n"
+def copy_to_clipboard(text: str) -> str | None:
+    """Put text on the clipboard; returns how (a tool's name, "terminal") or None.
+
+    Uses the platform's clipboard command when there is one (pbcopy, clip.exe, wl-copy,
+    xclip, xsel). Otherwise, on a terminal, it sends an OSC 52 sequence, which terminals
+    that allow it (also over SSH and in containers) turn into a clipboard write; whether
+    that happened cannot be checked.
+    """
+    import base64
+    import os
+    import subprocess
+
+    tools = []
+    if sys.platform == "darwin":
+        tools.append(["pbcopy"])
+    wsl = hasattr(os, "uname") and "microsoft" in os.uname().release.lower()
+    if sys.platform == "win32" or wsl:
+        tools.append(["clip.exe"])
+    if os.environ.get("WAYLAND_DISPLAY"):
+        tools.append(["wl-copy"])
+    if os.environ.get("DISPLAY"):
+        tools += [["xclip", "-selection", "clipboard"], ["xsel", "--clipboard", "--input"]]
+    for tool in tools:
+        if not shutil.which(tool[0]):
+            continue
+        data = text.encode("utf-16-le" if tool[0] == "clip.exe" else "utf-8")
+        try:
+            subprocess.run(tool, input=data, check=True, timeout=5,
+                           stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
+            return tool[0]
+        except (OSError, subprocess.SubprocessError):
+            continue
+    if sys.stdout.isatty():
+        payload = base64.b64encode(text.encode("utf-8")).decode("ascii")
+        sys.stdout.write(f"\033]52;c;{payload}\a")
+        sys.stdout.flush()
+        return "terminal"
+    return None
 
 
 def cmd_prompt(args) -> int:
@@ -122,6 +166,7 @@ def cmd_validate(args) -> int:
             "ok": not errors and not (args.strict and warnings),
             "map": analysis["map_path"],
             "counts": _counts(model),
+            "grounding": _grounding(model, analysis) if model else None,
             "errors": len(errors),
             "warnings": len(warnings),
             "diagnostics": diags,
@@ -165,8 +210,17 @@ def cmd_validate(args) -> int:
                 else ""
             )
             print(
-                f"{analysis['map_path']}: {c['nodes']} nodes, {c['relationships']} relationships,"
-                f" {c['flows']} flows; {ok_refs}/{len(refs)} source refs resolve{owned}"
+                f"{analysis['map_path']}: {c['nodes']} nodes, {c['relationships']} relationships"
+                f" ({c['exchanges']} exchanges), {c['flows']} flows; {ok_refs}/{len(refs)} source"
+                f" refs resolve{owned}"
+            )
+            g = _grounding(model, analysis)
+            print(
+                f"  {g['sited']}/{g['data']} data and error relationships cite a site with its focus text "
+                f"found; {g['focus_found']}/{g['focus']} focus texts found"
+                + (f"; Python definitions: {g['units']['mapped']} cited, {g['units']['coarse']} "
+                   f"only in a broader ref, {g['units']['unmapped']} shown by no node"
+                   if g["units"] else "")
             )
             infos = len(diags) - len(errors) - len(warnings)
             if infos and not args.verbose:
@@ -300,8 +354,22 @@ def _chain_of(by_id, nid):
 
 def _counts(model):
     if not model:
-        return {"nodes": 0, "relationships": 0, "flows": 0}
-    return {k: len(model[k]) for k in ("nodes", "relationships", "flows")}
+        return {"nodes": 0, "relationships": 0, "exchanges": 0, "flows": 0}
+    return {k: len(model[k]) for k in ("nodes", "relationships", "exchanges", "flows")}
+
+
+def _grounding(model, analysis):
+    """How much of the map's data movement points at code (not whether it is right)."""
+    from .model import SITE_ROLES
+
+    data = [r for r in model["relationships"] if r["type"] in ("data", "error")]
+    anchors = [a for r in model["relationships"] for x in r["refs"] for a in x.get("anchors", [])]
+    sited = [r for r in data if any(
+        x["role"] in SITE_ROLES and any(a["status"] == "found" for a in x.get("anchors", []))
+        for x in r["refs"])]
+    units = ((analysis.get("ownership") or {}).get("units") or {}).get("counts")
+    return {"data": len(data), "sited": len(sited), "focus": len(anchors),
+            "focus_found": sum(a["status"] == "found" for a in anchors), "units": units}
 
 
 def cmd_serve(args) -> int:
@@ -333,6 +401,41 @@ def cmd_guide(args) -> int:
         print(f"wrote {dest} (repoluma {__version__}); review it before pointing an agent at it.")
         return 0
     sys.stdout.write(text)
+    return 0
+
+
+def cmd_migrate(args) -> int:
+    from .migrate import migrate_text
+
+    ws = _workspace(args)
+    try:
+        text = ws.map_path.read_text(encoding="utf-8")
+    except OSError as exc:
+        print(f"cannot read {ws.map_display}: {exc}", file=sys.stderr)
+        return 1
+    new, notes, decisions = migrate_text(text)
+    for n in notes:
+        print(f"  changed  {n}")
+    if new is None:
+        for d in decisions:
+            print(f"  cannot migrate: {d}", file=sys.stderr)
+        return 1
+    if args.in_place:
+        dest = ws.map_path
+    else:
+        dest = Path(args.output) if args.output else ws.map_path.with_suffix(".v3.yaml")
+        if dest.exists() and not args.force:
+            print(f"{dest} exists; not overwriting (use --force, or --output PATH).",
+                  file=sys.stderr)
+            return 1
+    dest.write_text(new, encoding="utf-8")
+    print(f"wrote {dest}" + ("" if args.in_place else f" (your map {ws.map_display} is unchanged)"))
+    if decisions:
+        print(f"\n{len(decisions)} decisions need you (read the code; nothing was guessed):")
+        for d in decisions:
+            print(f"  - {d}")
+    print("\nNext: make these decisions, then run `repoluma validate` on the result. "
+          "`repoluma guide` explains schema_version 3 ('Migrating from schema_version 2').")
     return 0
 
 
@@ -381,6 +484,8 @@ def build_parser() -> argparse.ArgumentParser:
 
     sp = sub.add_parser("init", help="create a placeholder map and print the agent prompt")
     common(sp)
+    sp.add_argument("--no-copy", action="store_true",
+                    help="do not copy the prompt to the clipboard (it is copied only on a terminal)")
     sp.set_defaults(func=cmd_init)
 
     sp = sub.add_parser("validate", help="validate the map and resolve its source references")
@@ -412,6 +517,16 @@ def build_parser() -> argparse.ArgumentParser:
     sp.add_argument("--write", metavar="PATH", help="write to a file or directory instead")
     sp.add_argument("--force", action="store_true", help="overwrite an existing file")
     sp.set_defaults(func=cmd_guide)
+
+    sp = sub.add_parser(
+        "migrate",
+        help=f"rewrite a schema_version 2 map for version {CURRENT_SCHEMA_VERSION} (to a new file)",
+    )
+    common(sp)
+    sp.add_argument("--output", metavar="PATH", help="where to write (default: <map>.v3.yaml)")
+    sp.add_argument("--in-place", action="store_true", help="overwrite the map itself")
+    sp.add_argument("--force", action="store_true", help="overwrite an existing output file")
+    sp.set_defaults(func=cmd_migrate)
 
     sp = sub.add_parser("schema", help="print the JSON Schema of the map format")
     sp.set_defaults(func=cmd_schema)

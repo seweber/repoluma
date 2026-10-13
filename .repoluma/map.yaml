@@ -1,6 +1,6 @@
 # repoluma's own map, maintained with the public schema and validator.
 # Update it in the same change as the code it describes (see docs/development.md).
-schema_version: 2
+schema_version: 3
 
 repository:
   name: repoluma
@@ -34,6 +34,7 @@ nodes:
       - src/repoluma/__main__.py
       - src/repoluma/__init__.py
       - src/repoluma/guide/AUTHORING.md
+      - src/repoluma/migrate.py
       - src/repoluma/model.py#json_schema
     details: No model provider is embedded. The installed package prints its own guide so instructions always match the schema version.
 
@@ -42,7 +43,7 @@ nodes:
     kind: responsibility
     label: Create starter map
     summary: "`repoluma init` creates a placeholder map without overwriting anything and prints a prompt to hand to an agent."
-    evidence: observed
+    certainty: observed
     refs:
       - path: src/repoluma/cli.py
         symbol: cmd_init
@@ -57,10 +58,10 @@ nodes:
     kind: responsibility
     label: Instruct coding agents
     summary: Teaches agents to describe purpose before structure, attach evidence and report gaps; exportable as a skill file on request.
-    evidence: observed
+    certainty: observed
     refs:
       - path: src/repoluma/guide/AUTHORING.md
-        symbol: Evidence honesty
+        symbol: Certainty honesty
         role: docs
       - path: src/repoluma/cli.py
         symbol: cmd_guide
@@ -79,7 +80,7 @@ nodes:
         - A data relationship goes from where the data comes from to where it goes, labelled with the data
         - Unknown fields are warned about; x- prefixed fields are ignored
       assumptions: [Newer schema versions are refused with an upgrade hint]
-    evidence: observed
+    certainty: observed
     refs:
       - path: src/repoluma/model.py
         symbol: json_schema
@@ -94,13 +95,31 @@ nodes:
         role: test
       - path: src/repoluma/__init__.py
 
+  - id: migrate-map
+    parent: describe
+    kind: responsibility
+    label: Migrate map to schema 3
+    summary: "`repoluma migrate` does the mechanical part (version, evidence → certainty) in a new file, checks that nothing else changed, and lists the decisions that need the code: lines on containers, data lines without a site, opposite lines that may be one exchange."
+    details: It reads the map file and writes the result next to it (map.v3.yaml), or over it only with --in-place; it never pairs lines or picks an endpoint itself. Not drawn as lines to the map file, to keep the overview readable for a one-off step.
+    certainty: observed
+    refs:
+      - path: src/repoluma/migrate.py
+        symbol: migrate_text
+      - path: src/repoluma/migrate.py
+        symbol: _decisions
+      - path: src/repoluma/cli.py
+        symbol: cmd_migrate
+      - path: src/repoluma/migrate.py
+      - path: tests/test_migrate.py
+        role: test
+
   # ----------------------------------------------------------------- validation
   - id: cli
     parent: describe
     kind: component
     label: Command-line interface
     summary: The repoluma command. Argument parsing and the entry point; the code of each subcommand is shown with the capability it serves.
-    evidence: observed
+    certainty: observed
     refs:
       - path: src/repoluma/cli.py
         symbol: build_parser
@@ -120,7 +139,7 @@ nodes:
     kind: responsibility
     label: Parse map YAML
     summary: Safe YAML loading that remembers line numbers for every record; no Python objects can be constructed.
-    evidence: observed
+    certainty: observed
     refs:
       - path: src/repoluma/model.py
         symbol: parse_yaml
@@ -133,13 +152,43 @@ nodes:
     label: Check map structure
     summary: Required fields, id rules, references between records, containment cycles, flow step ordering.
     details: Lenient by design. Broken parents become top level and broken relationships are dropped, each with a diagnostic, so a partial map stays viewable.
-    evidence: observed
+    certainty: observed
     refs:
       - path: src/repoluma/model.py
         symbol: validate_document
+      - path: src/repoluma/model.py
+        symbol: _Validator
+      - path: src/repoluma/model.py
+        symbol: _rel_type
       - path: tests/test_model.py
         symbol: test_containment_cycle_is_broken_and_reported
         role: test
+
+  - id: check-connections
+    parent: validate
+    kind: responsibility
+    label: Check line ends and exchanges
+    summary: "Lines end on concrete items, never on containers; an exchange has one input and what comes back runs the other way; observed data lines cite where the data is handed over or taken in."
+    details: Schema_version 2 maps keep lines on containers, reported as notes. Pairing is never inferred from opposite directions; only a shared exchange id pairs two lines.
+    certainty: observed
+    refs:
+      - path: src/repoluma/model.py
+        symbol: _check_connections
+      - path: tests/test_model.py
+        symbol: test_v3_relationship_on_container_is_an_error_but_v2_is_kept
+        role: test
+      - path: tests/test_model.py
+        symbol: test_exchange_legs_must_run_between_the_same_nodes
+        role: test
+
+  - id: format-vocabulary
+    parent: validate
+    kind: data
+    label: Format vocabulary
+    summary: The kinds, relationship types, certainty states, ref roles, exchange legs and allowed fields the validator checks against, and small parsing helpers.
+    notes: Cited as a whole file, so the validation area accounts for every line of model.py; the parts other nodes describe are cited by them.
+    certainty: observed
+    refs:
       - path: src/repoluma/model.py
 
   - id: diagnostics
@@ -150,7 +199,7 @@ nodes:
     contract:
       outputs: ["severity, code, message, location, line, record, hint"]
       guarantees: [Exit status 1 when there are errors (or warnings with --strict)]
-    evidence: observed
+    certainty: observed
     refs:
       - path: src/repoluma/model.py
         symbol: Diagnostic
@@ -165,6 +214,8 @@ nodes:
     owns:
       - src/repoluma/sources.py
       - src/repoluma/ownership.py
+      - src/repoluma/workspace.py#_anchor
+      - src/repoluma/workspace.py#_ReviewedText
 
   - id: resolve-ref
     parent: evidence
@@ -178,7 +229,7 @@ nodes:
         - Python symbols are matched exactly by syntax tree, never by similarity
         - An uncertain match is reported as heuristic, ambiguous or moved, never silently retargeted
       errors: [missing_file, missing_symbol, ambiguous, out_of_range, excluded, binary, too_large]
-    evidence: observed
+    certainty: observed
     refs:
       - path: src/repoluma/sources.py
         symbol: Repository.resolve
@@ -192,7 +243,7 @@ nodes:
     kind: responsibility
     label: Index Python symbols
     summary: Indexes qualified names of classes, functions and module constants with ast.parse (parsing only, no import).
-    evidence: observed
+    certainty: observed
     refs:
       - path: src/repoluma/sources.py
         symbol: Repository._python_index
@@ -202,7 +253,7 @@ nodes:
     kind: responsibility
     label: Match non-Python definitions
     summary: Definition-like text patterns plus brace or indentation matching; Markdown headings; TOML tables. Disclosed as approximate.
-    evidence: observed
+    certainty: observed
     refs:
       - path: src/repoluma/sources.py
         symbol: _heuristic_spans
@@ -215,7 +266,7 @@ nodes:
     kind: rule
     label: Repository files only
     summary: Only regular files inside the root after symlink resolution, never excluded files (secrets, VCS, caches), never binary or huge files.
-    evidence: observed
+    certainty: observed
     refs:
       - path: src/repoluma/sources.py
         symbol: Repository.safe_path
@@ -231,7 +282,7 @@ nodes:
     label: Report changes since review
     summary: Reports HEAD, uncommitted files, and which referenced files changed since the map's reviewed revision.
     details: Git runs read-only with hooks and fsmonitor disabled, so viewing a repository cannot execute its configuration.
-    evidence: observed
+    certainty: observed
     refs:
       - path: src/repoluma/sources.py
         symbol: git_state
@@ -246,7 +297,7 @@ nodes:
     kind: responsibility
     label: Count unmapped files
     summary: Per-directory counts of code files that have an owner, an honest signal of unmapped areas.
-    evidence: observed
+    certainty: observed
     refs:
       - path: src/repoluma/sources.py
         symbol: coverage
@@ -257,7 +308,7 @@ nodes:
     label: Assign files to areas
     summary: Gives every code file exactly one owning area from the top-level nodes' owns patterns, decides which pane shows each line, and reports files without an owner.
     details: The most specific pattern wins (an exact path beats a glob); path#Symbol gives part of a file to another area. Every line of code must be shown by a node of its area (glue such as imports and comments excepted); code no node shows is an error and is flagged in the viewer. Tests, docs and tooling need no owner.
-    evidence: observed
+    certainty: observed
     refs:
       - path: src/repoluma/ownership.py
         symbol: compute_ownership
@@ -270,12 +321,51 @@ nodes:
         role: test
       - path: src/repoluma/ownership.py
 
+  - id: focus-anchors
+    parent: evidence
+    kind: responsibility
+    label: Locate focus text
+    summary: Finds each focus text of a ref exactly once inside the ref's range (whitespace normalized); no match or several are reported, never resolved to the first or a similar text.
+    details: For files changed since the reviewed revision, it also says whether the text was already there then, which says nothing about whether its surroundings changed. The result is attached to each ref of the analysis (its anchors).
+    certainty: observed
+    refs:
+      - path: src/repoluma/sources.py
+        symbol: Repository.resolve_focus
+      - path: src/repoluma/sources.py
+        symbol: Normalized
+      - path: src/repoluma/sources.py
+        symbol: _find_all
+      - path: src/repoluma/workspace.py
+        symbol: _anchor
+      - path: src/repoluma/workspace.py
+        symbol: _ReviewedText
+      - path: src/repoluma/sources.py
+        symbol: file_at_revision
+      - path: tests/test_sources.py
+        symbol: test_focus_must_occur_exactly_once_in_the_range
+        role: test
+
+  - id: code-accounting
+    parent: evidence
+    kind: responsibility
+    label: Report broadly covered code
+    summary: Sorts each Python definition of an owned file into cited by a node, covered only by a broader ref (class or whole file), or shown by none; names definitions added since review that only a broad ref covers. The result is part of the analysis's ownership payload.
+    certainty: observed
+    refs:
+      - path: src/repoluma/ownership.py
+        symbol: mapping_units
+      - path: src/repoluma/ownership.py
+        symbol: python_units
+      - path: tests/test_ownership.py
+        symbol: test_new_definition_inside_a_whole_file_ref_is_reported_after_review
+        role: test
+
   - id: working-tree
     parent: evidence
     kind: resource
     label: Working tree files
     summary: The repository's files as they are now, including uncommitted edits. The single source of displayed code.
-    evidence: observed
+    certainty: observed
     refs:
       - path: src/repoluma/sources.py
         symbol: Repository.read
@@ -295,7 +385,7 @@ nodes:
     kind: responsibility
     label: Assemble map analysis
     summary: Validates the map, resolves every reference once, and gathers git and coverage context into one payload.
-    evidence: observed
+    certainty: observed
     refs:
       - path: src/repoluma/workspace.py
         symbol: Workspace.analyze
@@ -316,7 +406,7 @@ nodes:
         - source = bounded line excerpt with a change token
       guarantees: [Read-only, at most 2000 lines per excerpt]
       errors: [403 wrong Host, Origin or token; 405 non-GET; error field for unservable files]
-    evidence: observed
+    certainty: observed
     refs:
       - path: src/repoluma/server.py
         symbol: make_handler
@@ -332,7 +422,7 @@ nodes:
     kind: rule
     label: Loopback and token only
     summary: Loopback by default, Host allow-list against DNS rebinding, per-process token, cross-origin refusal, strict CSP.
-    evidence: observed
+    certainty: observed
     refs:
       - path: src/repoluma/server.py
         symbol: create_server
@@ -345,7 +435,7 @@ nodes:
     kind: responsibility
     label: Reanalyze on file changes
     summary: Caches the analysis and recomputes it when the map or a referenced file changes (stat tokens), so polling is cheap.
-    evidence: observed
+    certainty: observed
     refs:
       - path: src/repoluma/server.py
         symbol: ViewerState
@@ -365,7 +455,7 @@ nodes:
     label: Size and nest regions
     summary: Sizes regions bottom-up and places them top-down at a constant scale step, so every node at the same depth has the same on-screen size at any zoom.
     details: Geometry depends only on the map, never on zoom, filters or selection, so the map does not rearrange while navigating.
-    evidence: observed
+    certainty: observed
     refs:
       - path: src/repoluma/web/js/layout.js
         symbol: computeLayout
@@ -377,7 +467,7 @@ nodes:
     label: Place connected items together
     summary: Places the items of each region so connected items sit close and items talking to other regions sit on the side facing them.
     details: Stress majorization gives neutral positions, an optimal assignment snaps them to a grid, and local swaps shorten routes and avoid bends. Maps up to 1,500 nodes try several variants per region and keep the one that routes best. Last, an item smaller than its grid cell moves within it to where its lines run straight.
-    evidence: observed
+    certainty: observed
     refs:
       - path: src/repoluma/web/js/arrange.js
         symbol: arrange
@@ -392,7 +482,7 @@ nodes:
     kind: rule
     label: Equal size at equal depth
     summary: The child scale step K is global; panning at a fixed zoom shows comparable detail in every region.
-    evidence: observed
+    certainty: observed
     refs:
       - path: src/repoluma/web/js/layout.js
         symbol: K
@@ -404,7 +494,7 @@ nodes:
     kind: component
     label: Zoom and pan camera
     summary: Pointer-anchored zoom, panning, and smooth fly-to (van Wijk and Nuij) that zooms out before travelling far.
-    evidence: observed
+    certainty: observed
     refs:
       - path: src/repoluma/web/js/camera.js
         symbol: Camera.flyTo
@@ -417,7 +507,7 @@ nodes:
     kind: responsibility
     label: Draw detail by zoom level
     summary: Draws only what is in view; text becomes readable, greeked, or an overview label depending on its projected size.
-    evidence: observed
+    certainty: observed
     refs:
       - path: src/repoluma/web/js/render.js
         symbol: Renderer.drawNode
@@ -428,8 +518,8 @@ nodes:
     kind: responsibility
     label: Route connection lines
     summary: Connects boxes with horizontal and vertical lines that avoid everything drawn, deciding the inside of nested regions before where a line crosses their borders.
-    details: A line may touch a box anywhere along a side. For each end, the ways out of every enclosing region are computed from the inside out (straight and L-shaped ways keep a range of border positions, split and priced by the placed lines they would cross), and the region containing both ends picks the cheapest combination of a straight, L or Z line. Spots on box sides and borders are claimed so lines keep their spacing; finally, parallel pieces that run alongside each other are ordered by where they turn off and moved apart as little as needed. Only connections with identical endpoints share a line; flows add no lines of their own.
-    evidence: observed
+    details: A line may touch a box anywhere along a side. For each end, the ways out of every enclosing region are computed from the inside out (straight and L-shaped ways keep a range of border positions, split and priced by the placed lines they would cross), and the region containing both ends picks the cheapest combination of a straight, L or Z line. Spots on box sides and borders are claimed so lines keep their spacing; finally, parallel pieces that run alongside each other are ordered by where they turn off and moved apart as little as needed. Only connections with identical endpoints share a line, except that the request and answer of one exchange are routed once and drawn as two lanes, and errors always get a line of their own; flows add no lines of their own.
+    certainty: observed
     refs:
       - path: src/repoluma/web/js/route.js
         symbol: routeNets
@@ -449,7 +539,7 @@ nodes:
     label: Show flow steps
     summary: Shows a flow's numbered steps on the relationships they use, with dashed failure and compensation branches, and a step bar on the map to go back, forward or close.
     details: The validator resolves which relationship each step is drawn on (its `via`, or one from where the flow is to this step's node) and warns when there is none, so a flow never shows a connection the map does not have. It also warns when a step jumps over nodes the flow passes through, since only the steps' nodes and the ends of their relationships stay bright.
-    evidence: observed
+    certainty: observed
     refs:
       - path: src/repoluma/web/js/render.js
         symbol: Renderer.drawFlow
@@ -465,7 +555,7 @@ nodes:
     kind: component
     label: Inspector and side panels
     summary: Outline (keyboard-accessible tree), flows, layers, coverage, and an inspector with contract, evidence and relationships.
-    evidence: observed
+    certainty: observed
     refs:
       - path: src/repoluma/web/js/ui.js
         symbol: renderInspector
@@ -478,7 +568,7 @@ nodes:
     kind: responsibility
     label: "Filter lines, kinds and tags"
     summary: Hide relationship types (data, control, dependency), node kinds or tags; hidden nodes keep their place as outlines and hidden counts stay visible. A legend on the map says what each line type and arrow means.
-    evidence: observed
+    certainty: observed
     refs:
       - path: src/repoluma/web/js/main.js
         symbol: App.recomputeHidden
@@ -487,13 +577,54 @@ nodes:
       - path: src/repoluma/web/js/ui.js
         symbol: renderMapLegend
 
+  - id: line-evidence
+    parent: navigate
+    kind: component
+    label: Line evidence inspector
+    summary: For a selected line, what moves and in which direction, its exchange with the other legs, and the cited sites with the focused text highlighted in their code, loaded on demand.
+    details: Certainty, whether the text was found, and freshness are shown separately. A site that is not cited is said to be missing, never replaced by a whole function.
+    certainty: observed
+    refs:
+      - path: src/repoluma/web/js/ui.js
+        symbol: renderRelationship
+      - path: src/repoluma/web/js/ui.js
+        symbol: evidenceCard
+      - path: src/repoluma/web/js/ui.js
+        symbol: loadExcerpt
+      - path: src/repoluma/web/js/ui.js
+        symbol: renderExchange
+
+  - id: line-targets
+    parent: navigate
+    kind: responsibility
+    label: Pick lines by label
+    summary: Labels and bundle badges drawn on a line are click targets for exactly that line; hovering names its true ends, and the selected line's other exchange legs are highlighted more quietly.
+    certainty: observed
+    refs:
+      - path: src/repoluma/web/js/render.js
+        symbol: Renderer.hitRoute
+      - path: src/repoluma/web/js/render.js
+        symbol: Renderer.drawNotes
+      - path: src/repoluma/web/js/main.js
+        symbol: App.showRouteTip
+
+  - id: lines-list
+    parent: navigate
+    kind: component
+    label: List of all lines
+    summary: The Lines tab lists every relationship, exchanges first with their legs, so lines whose labels do not fit at the current zoom stay reachable by keyboard and screen reader.
+    certainty: observed
+    refs:
+      - path: src/repoluma/web/js/ui.js
+        symbol: renderConnections
+
   # ---------------------------------------------------------------- source panes
   - id: app-shell
     parent: navigate
     kind: component
     label: Viewer state and input
     summary: Loads the analysis, holds the selection, view, filters and URL state, and handles input, search and live refresh.
-    evidence: observed
+    certainty: observed
     refs:
       - path: src/repoluma/web/js/main.js
 
@@ -502,7 +633,7 @@ nodes:
     kind: component
     label: Viewer page and styles
     summary: The single HTML page (panels, controls, help) and its stylesheet with light and dark themes.
-    evidence: observed
+    certainty: observed
     refs:
       - path: src/repoluma/web/index.html
       - path: src/repoluma/web/app.css
@@ -512,7 +643,7 @@ nodes:
     kind: component
     label: DOM and math helpers
     summary: Small DOM and math helpers used across the viewer; map and source text reaches the DOM only as text.
-    evidence: observed
+    certainty: observed
     refs:
       - path: src/repoluma/web/js/util.js
 
@@ -532,7 +663,7 @@ nodes:
     label: Source code panes
     summary: DOM panes positioned with the camera transform once their text is large enough; inactive panes forward wheel and drag to the map.
     details: Click activates a pane (wheel scrolls code, text is selectable); Esc releases it. Context lines can be expanded.
-    evidence: observed
+    certainty: observed
     refs:
       - path: src/repoluma/web/js/panes.js
         symbol: PaneLayer.update
@@ -545,7 +676,7 @@ nodes:
     kind: component
     label: Code excerpt loader
     summary: Fetches visible excerpts with bounded concurrency, drops requests that scrolled out of view, invalidates changed files.
-    evidence: observed
+    certainty: observed
     refs:
       - path: src/repoluma/web/js/panes.js
         symbol: SourceCache
@@ -555,7 +686,7 @@ nodes:
     kind: component
     label: Syntax highlighter
     summary: Approximate line tokenizer that only produces text nodes.
-    evidence: observed
+    certainty: observed
     refs:
       - path: src/repoluma/web/js/highlight.js
         symbol: tokenize
@@ -567,7 +698,7 @@ nodes:
     kind: responsibility
     label: Locate a file's area
     summary: From a file (or line) to its area and the pane that shows it, and who cites it, in the Files tab, the file view and `repoluma where`.
-    evidence: observed
+    certainty: observed
     refs:
       - path: src/repoluma/web/js/files.js
         symbol: FileIndex.ownerAt
@@ -583,6 +714,7 @@ nodes:
     summary: Stable ids, links that restore the exact view, and copyable selection summaries make it easy to point an agent at a region.
     owns:
       - src/repoluma/web/js/main.js#App.agentSummary
+      - src/repoluma/web/js/main.js#App.relationshipSummary
       - src/repoluma/web/js/main.js#App.restoreFromHash
       - src/repoluma/web/js/ui.js#computeImpact
 
@@ -590,18 +722,20 @@ nodes:
     parent: discuss
     kind: responsibility
     label: Copy summary for agent
-    summary: Text with ids, containment path, contract, resolved source ranges, relationships, review candidates and a view link.
-    evidence: observed
+    summary: Text with ids, containment path, contract, resolved source ranges, relationships, review candidates and a view link; for a line, its exchange and cited sites with their status.
+    certainty: observed
     refs:
       - path: src/repoluma/web/js/main.js
         symbol: App.agentSummary
+      - path: src/repoluma/web/js/main.js
+        symbol: App.relationshipSummary
 
   - id: view-links
     parent: discuss
     kind: responsibility
     label: Link to exact view
     summary: The URL fragment carries camera, selection, active flow step and filters.
-    evidence: observed
+    certainty: observed
     refs:
       - path: src/repoluma/web/js/main.js
         symbol: App.restoreFromHash
@@ -611,7 +745,7 @@ nodes:
     kind: responsibility
     label: Trace change impact
     summary: Walks modeled dependency relationships backwards up to three steps and shows the path, with a coverage disclaimer.
-    evidence: observed
+    certainty: observed
     refs:
       - path: src/repoluma/web/js/ui.js
         symbol: computeImpact
@@ -621,7 +755,7 @@ nodes:
     kind: responsibility
     label: Sketch proposed changes
     summary: Sketching a proposed change on top of the current map, kept visibly separate from implemented behavior.
-    evidence: planned
+    certainty: planned
 
   # -------------------------------------------------------------------- outside
   - id: coding-agent
@@ -638,70 +772,1119 @@ nodes:
     kind: resource
     label: Map file
     summary: .repoluma/map.yaml in the viewed repository, tracked in version control.
-    evidence: observed
+    certainty: observed
     refs:
       - path: src/repoluma/__init__.py
         symbol: DEFAULT_MAP_PATH
 
 relationships:
-  # data: from = where the data comes from, to = where it goes; label = the data
+  # Data goes from `from` to `to`, labelled with the data. A call and what comes back share an
+  # `exchange` (legs input / result / error). Observed data lines cite where the data is handed
+  # over (transfer) or taken in (receive), with `focus` on the exact text.
+
+  # ------------------------------------------------------------- authoring loop
   - {id: agent-reads-guide, from: authoring-guide, to: coding-agent, type: data, label: authoring instructions}
   - {id: agent-writes-map, from: coding-agent, to: map-file, type: data, label: map YAML}
-  - {id: agent-runs-validate, from: diagnostics, to: coding-agent, type: data, label: errors with repair hints}
-  - {id: init-writes-map, from: first-run, to: map-file, type: data, label: placeholder map (only if missing), evidence: observed}
-  - {id: parse-reads-map, from: map-file, to: parse-map, type: data, label: map YAML, evidence: observed}
-  - {id: integrity-after-parse, from: parse-map, to: check-integrity, type: data, label: document with line numbers, evidence: observed}
-  - {id: integrity-reports, from: check-integrity, to: diagnostics, type: data, label: errors and warnings, evidence: observed}
-  - {id: analysis-validates, from: check-integrity, to: analysis, type: data, label: normalized model, evidence: observed}
-  - {id: resolve-reads-tree, from: working-tree, to: resolve-ref, type: data, label: file contents, evidence: observed}
-  - {id: resolve-python, from: python-symbols, to: resolve-ref, type: data, label: symbol line ranges (.py), evidence: observed}
-  - {id: resolve-heuristic, from: text-heuristics, to: resolve-ref, type: data, label: line ranges by text pattern, evidence: observed}
-  - {id: analysis-resolves, from: resolve-ref, to: analysis, type: data, label: resolution of every ref, evidence: observed}
-  - {id: freshness-reads-tree, from: working-tree, to: freshness, type: data, label: git status and diff, evidence: observed}
-  - {id: analysis-freshness, from: freshness, to: analysis, type: data, label: files changed since review, evidence: observed}
-  - {id: analysis-coverage, from: coverage, to: analysis, type: data, label: coverage per directory, evidence: observed}
-  - {id: ownership-lists-files, from: working-tree, to: ownership, type: data, label: file list, evidence: observed}
-  - {id: analysis-ownership, from: ownership, to: analysis, type: data, label: owner of every file, evidence: observed}
-  - {id: lookup-uses-api, from: http-api, to: file-lookup, type: data, label: owners and whole files, evidence: observed}
-  - {id: validate-command-analyzes, from: analysis, to: diagnostics, type: data, label: diagnostics (same analysis as the viewer), evidence: observed}
-  - {id: api-serves-analysis, from: analysis, to: http-api, type: data, label: "model, resolutions, diagnostics", evidence: observed}
-  - {id: api-uses-analysis, from: change-detection, to: http-api, type: data, label: status digest, evidence: observed}
-  - {id: shell-loads, from: http-api, to: app-shell, type: data, label: analysis and status digest, evidence: observed}
-  - {id: layout-consumes-api, from: http-api, to: layout, type: data, label: bootstrap (model and resolutions), evidence: observed}
-  - {id: layout-arranges, from: arrange, to: layout, type: data, label: positions per region, evidence: observed}
-  - {id: layout-routes, from: route-lines, to: layout, type: data, label: line routes, evidence: observed}
-  - {id: arrange-scores-routes, from: route-lines, to: arrange, type: data, label: routing scores of candidate arrangements, evidence: observed}
-  - {id: lod-uses-layout, from: layout, to: draw-lod, type: data, label: boxes and routes, evidence: observed}
-  - {id: lod-uses-camera, from: camera, to: draw-lod, type: data, label: zoom and position, evidence: observed}
-  - {id: panes-placed-by-lod, from: draw-lod, to: code-panes, type: data, label: visible panes, evidence: observed}
-  - {id: cache-requests-source, from: http-api, to: source-cache, type: data, label: excerpts (/api/source), evidence: observed}
-  - {id: panes-fetch, from: source-cache, to: code-panes, type: data, label: source lines, evidence: observed}
-  - {id: panes-highlight, from: highlight, to: code-panes, type: data, label: highlighted tokens, evidence: observed}
-  - {id: panels-show-diagnostics, from: diagnostics, to: panels, type: data, label: diagnostics, evidence: observed}
-  - {id: panels-impact, from: impact, to: panels, type: data, label: review candidates, evidence: observed}
-  - {id: summary-uses-impact, from: impact, to: agent-summary, type: data, label: review candidates, evidence: observed}
-  - {id: summary-links, from: view-links, to: agent-summary, type: data, label: view links, evidence: observed}
+  - {id: agent-runs-validate, from: diagnostics, to: coding-agent, type: error, label: errors with repair hints}
+
+  - id: init-writes-map
+    from: first-run
+    to: map-file
+    type: data
+    label: placeholder map (only if missing)
+    certainty: observed
+    refs:
+      - path: src/repoluma/cli.py
+        symbol: cmd_init
+        role: transfer
+        focus:
+          - 'if ws.map_path.exists()'
+          - 'ws.map_path.write_text(SKELETON.format(name=ws.root.name), encoding="utf-8")'
+
+  - id: parse-reads-map
+    from: map-file
+    to: parse-map
+    type: data
+    label: map YAML
+    certainty: observed
+    refs:
+      - path: src/repoluma/model.py
+        symbol: load_map
+        role: receive
+        focus:
+          - 'text = path.read_text(encoding="utf-8")'
+          - 'doc, err = parse_yaml(text)'
+
+  - id: integrity-after-parse
+    from: parse-map
+    to: check-integrity
+    type: data
+    label: document with line numbers
+    certainty: observed
+    refs:
+      - path: src/repoluma/model.py
+        symbol: _construct_mapping
+        role: origin
+        focus: 'result.line = node.start_mark.line + 1'
+      - path: src/repoluma/model.py
+        symbol: load_map
+        role: transfer
+        focus: 'return validate_document(doc)'
+
+  - id: connections-checked
+    from: check-integrity
+    to: check-connections
+    type: data
+    label: relationships and nodes
+    certainty: observed
+    exchange: connection-check
+    leg: input
+    refs:
+      - path: src/repoluma/model.py
+        symbol: validate_document
+        role: transfer
+        focus: 'exchanges = _check_connections(v, relationships, by_id, ids, version)'
+
+  - id: exchanges-returned
+    from: check-connections
+    to: check-integrity
+    type: data
+    label: exchanges (legs per exchange id)
+    certainty: observed
+    exchange: connection-check
+    leg: result
+    refs:
+      - path: src/repoluma/model.py
+        symbol: _check_connections
+        role: transfer
+        focus:
+          - 'exchanges.append'
+          - 'return exchanges'
+      - path: src/repoluma/model.py
+        symbol: validate_document
+        role: receive
+        focus: '"exchanges": exchanges,'
+
+  - id: connection-problems
+    from: check-connections
+    to: diagnostics
+    type: error
+    label: line and exchange problems
+    certainty: observed
+    refs:
+      - path: src/repoluma/model.py
+        symbol: _check_connections
+        role: transfer
+        focus:
+          - '"group-endpoint" if v3 else "legacy-group-endpoint",'
+          - '"observed-without-site",'
+          - '"exchange-incoherent"'
+
+  - id: integrity-reports
+    from: check-integrity
+    to: diagnostics
+    type: error
+    label: errors and warnings
+    certainty: observed
+    refs:
+      - path: src/repoluma/model.py
+        symbol: _Validator.add
+        role: transfer
+        focus: 'self.diags.append(Diagnostic(severity, code, message, location, _line(obj), record, hint))'
+
+  - id: analysis-validates
+    from: check-integrity
+    to: analysis
+    type: data
+    label: normalized model
+    certainty: observed
+    refs:
+      - path: src/repoluma/model.py
+        symbol: validate_document
+        role: transfer
+        focus: 'return LoadResult(model, v.diags)'
+      - path: src/repoluma/workspace.py
+        symbol: Workspace.analyze
+        role: receive
+        focus:
+          - 'result, repo = self.load()'
+          - 'model = result.model'
+
+  # ------------------------------------------------------------------- evidence
+  - id: resolve-reads-tree
+    from: working-tree
+    to: resolve-ref
+    type: data
+    label: file contents
+    certainty: observed
+    refs:
+      - path: src/repoluma/sources.py
+        symbol: Repository.read
+        role: transfer
+        focus:
+          - 'data = path.read_bytes()'
+          - 'return ft'
+      - path: src/repoluma/sources.py
+        symbol: Repository.resolve
+        role: receive
+        focus: 'ft = self.read(rel)'
+
+  - id: resolve-python
+    from: python-symbols
+    to: resolve-ref
+    type: data
+    label: symbol line ranges (.py)
+    certainty: observed
+    exchange: python-lookup
+    leg: result
+    refs:
+      - path: src/repoluma/sources.py
+        symbol: Repository._python_spans
+        role: transfer
+        focus: 'return sorted(set(index.get(symbol, [])))'
+      - path: src/repoluma/sources.py
+        symbol: Repository.resolve
+        role: receive
+        focus: 'spans, method = self._python_spans(rel, ft, symbol), "python-ast"'
+
+  - id: python-asked
+    from: resolve-ref
+    to: python-symbols
+    type: data
+    label: qualified symbol name (.py)
+    certainty: observed
+    exchange: python-lookup
+    leg: input
+    refs:
+      - path: src/repoluma/sources.py
+        symbol: Repository.resolve
+        role: transfer
+        focus:
+          - 'spans, method = self._python_spans(rel, ft, symbol), "python-ast"'
+      - path: src/repoluma/sources.py
+        symbol: Repository._python_spans
+        role: receive
+        focus:
+          - 'def _python_spans(self, rel, ft, symbol):'
+
+  - id: resolve-heuristic
+    from: text-heuristics
+    to: resolve-ref
+    type: data
+    label: line ranges by text pattern
+    certainty: observed
+    exchange: pattern-lookup
+    leg: result
+    refs:
+      - path: src/repoluma/sources.py
+        symbol: Repository.resolve
+        role: receive
+        focus: 'else: spans, method = _heuristic_spans(ft.lines, symbol, rel), "text-heuristic"'
+
+  - id: pattern-asked
+    from: resolve-ref
+    to: text-heuristics
+    type: data
+    label: symbol and file lines
+    certainty: observed
+    exchange: pattern-lookup
+    leg: input
+    refs:
+      - path: src/repoluma/sources.py
+        symbol: Repository.resolve
+        role: transfer
+        focus:
+          - 'else: spans, method = _heuristic_spans(ft.lines, symbol, rel), "text-heuristic"'
+      - path: src/repoluma/sources.py
+        symbol: _heuristic_spans
+        role: receive
+        focus:
+          - 'def _heuristic_spans(lines: list[str], symbol: str, rel: str)'
+
+  - id: analysis-resolves
+    from: resolve-ref
+    to: analysis
+    type: data
+    label: resolution of every ref
+    certainty: observed
+    exchange: ref-resolution
+    leg: result
+    refs:
+      - path: src/repoluma/workspace.py
+        symbol: Workspace.analyze
+        role: receive
+        focus:
+          - 'res = repo.resolve(ref)'
+          - 'refs[key] = res.to_dict()'
+      - path: src/repoluma/sources.py
+        symbol: Repository.resolve
+        role: transfer
+        focus:
+          - 'return Resolution(status, message, start, end, total, method)'
+
+  - id: ref-asked
+    from: analysis
+    to: resolve-ref
+    type: data
+    label: each ref (path, symbol, line hint)
+    certainty: observed
+    exchange: ref-resolution
+    leg: input
+    refs:
+      - path: src/repoluma/workspace.py
+        symbol: Workspace.analyze
+        role: transfer
+        focus:
+          - 'res = repo.resolve(ref)'
+      - path: src/repoluma/sources.py
+        symbol: Repository.resolve
+        role: receive
+        focus:
+          - 'def resolve(self, ref: dict[str, Any]) -> Resolution:'
+
+  - id: focus-in-range
+    from: resolve-ref
+    to: focus-anchors
+    type: data
+    label: the ref's resolved range
+    certainty: observed
+    refs:
+      - path: src/repoluma/workspace.py
+        symbol: _anchor
+        role: transfer
+        focus: 'anchors = repo.resolve_focus(ref, resolution)'
+      - path: src/repoluma/sources.py
+        symbol: Repository.resolve_focus
+        role: receive
+        focus: 'hits = [(p, q) for p, q in every if p[0] >= res.start and q[0] <= res.end]'
+
+  - id: focus-reads-review
+    from: freshness
+    to: focus-anchors
+    type: data
+    label: file text at the reviewed revision
+    certainty: observed
+    refs:
+      - path: src/repoluma/sources.py
+        symbol: file_at_revision
+        role: transfer
+        focus: 'out = _git(root, "show", f"{rev}:./{rel}", timeout=10.0)'
+      - path: src/repoluma/workspace.py
+        symbol: _anchor
+        role: receive
+        focus: 'old = reviewed_text.lines(ref["path"])'
+
+  - id: freshness-reads-tree
+    from: working-tree
+    to: freshness
+    type: data
+    label: git status and diff
+    certainty: observed
+    refs:
+      - path: src/repoluma/sources.py
+        symbol: git_state
+        role: receive
+        focus:
+          - 'status = _git(root, "status", "--porcelain=v1", "-z", "--untracked-files=all", ".") or ""'
+          - 'diff = _git(root, "diff", "--name-only", "--relative", "-z", reviewed_revision, "--")'
+
+  - id: analysis-freshness
+    from: freshness
+    to: analysis
+    type: data
+    label: files changed since review
+    certainty: observed
+    exchange: git-freshness
+    leg: result
+    refs:
+      - path: src/repoluma/workspace.py
+        symbol: Workspace.analyze
+        role: receive
+        focus:
+          - 'git = git_state(self.root, model["scope"]["reviewed_revision"])'
+          - 'res.changed_since_review = ref["path"] in changed'
+      - path: src/repoluma/sources.py
+        symbol: git_state
+        role: transfer
+        focus:
+          - 'return state'
+
+  - id: freshness-asked
+    from: analysis
+    to: freshness
+    type: data
+    label: root and reviewed revision
+    certainty: observed
+    exchange: git-freshness
+    leg: input
+    refs:
+      - path: src/repoluma/workspace.py
+        symbol: Workspace.analyze
+        role: transfer
+        focus:
+          - 'git = git_state(self.root, model["scope"]["reviewed_revision"])'
+      - path: src/repoluma/sources.py
+        symbol: git_state
+        role: receive
+        focus:
+          - 'def git_state(root: Path, reviewed_revision: str | None = None)'
+
+  - id: analysis-coverage
+    from: coverage
+    to: analysis
+    type: data
+    label: coverage per directory
+    certainty: observed
+    exchange: dir-coverage
+    leg: result
+    refs:
+      - path: src/repoluma/workspace.py
+        symbol: Workspace.analyze
+        role: receive
+        focus: '"by_dir": coverage(ownership["files"]),'
+      - path: src/repoluma/sources.py
+        symbol: coverage
+        role: transfer
+        focus:
+          - '{"dir": k, "files": v[0], "owned": v[1]}'
+
+  - id: coverage-asked
+    from: analysis
+    to: coverage
+    type: data
+    label: owned and required files
+    certainty: observed
+    exchange: dir-coverage
+    leg: input
+    refs:
+      - path: src/repoluma/workspace.py
+        symbol: Workspace.analyze
+        role: transfer
+        focus:
+          - 'coverage(ownership["files"])'
+      - path: src/repoluma/sources.py
+        symbol: coverage
+        role: receive
+        focus:
+          - 'def coverage(files: dict[str, dict[str, Any]], depth: int = 2)'
+
+  - id: ownership-lists-files
+    from: working-tree
+    to: ownership
+    type: data
+    label: file list
+    certainty: observed
+    refs:
+      - path: src/repoluma/sources.py
+        symbol: list_files
+        role: origin
+        focus: 'out = _git(root, "ls-files", "-z", "--cached", "--others", "--exclude-standard")'
+      - path: src/repoluma/workspace.py
+        symbol: Workspace.analyze
+        role: transfer
+        focus:
+          - 'files, truncated = list_files(self.root, repo)'
+          - 'ownership, own_diags = compute_ownership(model, files, repo, truncated)'
+
+  - id: analysis-ownership
+    from: ownership
+    to: analysis
+    type: data
+    label: owner of every file
+    certainty: observed
+    exchange: file-ownership
+    leg: result
+    refs:
+      - path: src/repoluma/ownership.py
+        symbol: compute_ownership
+        role: transfer
+        focus: 'return payload, diags'
+      - path: src/repoluma/workspace.py
+        symbol: Workspace.analyze
+        role: receive
+        focus: 'ownership["rest"], rest_diags = rest_of_files(model, ownership, refs, repo)'
+
+  - id: ownership-asked
+    from: analysis
+    to: ownership
+    type: data
+    label: map model and file list
+    certainty: observed
+    exchange: file-ownership
+    leg: input
+    refs:
+      - path: src/repoluma/workspace.py
+        symbol: Workspace.analyze
+        role: transfer
+        focus:
+          - 'ownership, own_diags = compute_ownership(model, files, repo, truncated)'
+      - path: src/repoluma/ownership.py
+        symbol: compute_ownership
+        role: receive
+        focus:
+          - 'def compute_ownership(model: dict[str, Any], files: list[str], repo, truncated=False):'
+
+  - id: accounting-reads-ownership
+    from: ownership
+    to: code-accounting
+    type: data
+    label: owners and parts of files
+    certainty: observed
+    refs:
+      - path: src/repoluma/workspace.py
+        symbol: Workspace.analyze
+        role: transfer
+        focus: 'ownership["units"], unit_diags = mapping_units('
+      - path: src/repoluma/ownership.py
+        symbol: mapping_units
+        role: receive
+        focus: 'for path, rec in sorted(ownership["files"].items()):'
+
+  - id: accounting-reads-review
+    from: freshness
+    to: code-accounting
+    type: data
+    label: files at the reviewed revision
+    certainty: observed
+    refs:
+      - path: src/repoluma/workspace.py
+        symbol: Workspace.analyze
+        role: transfer
+        focus: 'reviewed_text.lines if reviewed_text.rev else None,'
+      - path: src/repoluma/ownership.py
+        symbol: mapping_units
+        role: receive
+        focus: 'old = reviewed_lines(path)'
+
+  - id: lookup-uses-api
+    from: http-api
+    to: file-lookup
+    type: data
+    label: owners and whole files
+    certainty: observed
+    exchange: file-request
+    leg: response
+    refs:
+      - path: src/repoluma/web/js/main.js
+        symbol: App.load
+        role: receive
+        focus: 'this.indexFiles(data.ownership);'
+      - path: src/repoluma/web/js/ui.js
+        symbol: loadFileCode
+        role: receive
+        focus: 'const data = await app.fetchSource(path, 1, 2000)'
+
+  - id: file-asked
+    from: file-lookup
+    to: http-api
+    type: data
+    label: file path (whole file)
+    certainty: observed
+    exchange: file-request
+    leg: input
+    refs:
+      - path: src/repoluma/web/js/ui.js
+        symbol: loadFileCode
+        role: transfer
+        focus:
+          - 'const data = await app.fetchSource(path, 1, 2000)'
+      - path: src/repoluma/server.py
+        symbol: make_handler
+        role: receive
+        focus:
+          - 'rel = query.get("path", [""])[0]'
+
+  - id: validate-command-analyzes
+    from: analysis
+    to: diagnostics
+    type: error
+    label: diagnostics (same analysis as the viewer)
+    certainty: observed
+    refs:
+      - path: src/repoluma/cli.py
+        symbol: cmd_validate
+        role: receive
+        focus:
+          - 'analysis = ws.analyze(with_git=not args.no_git, with_coverage=False)'
+          - 'diags = analysis["diagnostics"]'
+
+  - id: api-serves-analysis
+    from: analysis
+    to: http-api
+    type: data
+    label: model, resolutions, diagnostics
+    certainty: observed
+    refs:
+      - path: src/repoluma/server.py
+        symbol: ViewerState.analysis
+        role: receive
+        focus: 'self._analysis = self.ws.analyze()'
+      - path: src/repoluma/server.py
+        symbol: make_handler
+        role: transfer
+        focus: 'self._json(HTTPStatus.OK, state.analysis(force=force))'
+
+  - id: api-uses-analysis
+    from: change-detection
+    to: http-api
+    type: data
+    label: status digest
+    certainty: observed
+    exchange: status-request
+    leg: result
+    refs:
+      - path: src/repoluma/server.py
+        symbol: ViewerState.status
+        role: origin
+        focus: 'digest = hashlib.sha1(json.dumps(tokens, sort_keys=True).encode()).hexdigest()[:16]'
+      - path: src/repoluma/server.py
+        symbol: make_handler
+        role: transfer
+        focus: 'self._json(HTTPStatus.OK, state.status())'
+      - path: src/repoluma/server.py
+        symbol: ViewerState.status
+        role: transfer
+        focus:
+          - 'return {"digest": digest, "tokens": tokens}'
+
+  - id: status-asked
+    from: http-api
+    to: change-detection
+    type: data
+    label: status request
+    certainty: observed
+    exchange: status-request
+    leg: input
+    refs:
+      - path: src/repoluma/server.py
+        symbol: make_handler
+        role: transfer
+        focus:
+          - 'self._json(HTTPStatus.OK, state.status())'
+      - path: src/repoluma/server.py
+        symbol: ViewerState.status
+        role: receive
+        focus:
+          - 'def status(self) -> dict[str, Any]:'
+
+  # --------------------------------------------------------------------- viewer
+  - id: shell-loads
+    from: http-api
+    to: app-shell
+    type: data
+    label: analysis and status digest
+    certainty: observed
+    exchange: bootstrap-request
+    leg: response
+    refs:
+      - path: src/repoluma/web/js/main.js
+        symbol: App.load
+        role: receive
+        focus:
+          - 'data = await api("/api/bootstrap" + (reason === "force" ? "?force=1" : ""));'
+          - 'const status = await api("/api/status")'
+
+  - id: bootstrap-asked
+    from: app-shell
+    to: http-api
+    type: data
+    label: bootstrap and status requests (with the page token)
+    certainty: observed
+    exchange: bootstrap-request
+    leg: input
+    refs:
+      - path: src/repoluma/web/js/main.js
+        symbol: api
+        role: transfer
+        focus:
+          - 'const res = await fetch(path, { headers: { "X-Repoluma-Token": TOKEN }, cache: "no-store" });'
+      - path: src/repoluma/server.py
+        symbol: make_handler
+        role: receive
+        focus:
+          - 'if path == "/api/bootstrap":'
+          - 'elif path == "/api/status":'
+
+  - id: layout-consumes-api
+    from: http-api
+    to: layout
+    type: data
+    label: bootstrap (model and resolutions)
+    certainty: observed
+    refs:
+      - path: src/repoluma/web/js/main.js
+        symbol: App.load
+        role: transfer
+        focus: 'this.layout = computeLayout(this.model, this.refs, (font, text) => this.measure(font, text));'
+
+  - id: layout-arranges
+    from: arrange
+    to: layout
+    type: data
+    label: positions per region
+    certainty: observed
+    exchange: arrangement
+    leg: result
+    refs:
+      - path: src/repoluma/web/js/layout.js
+        symbol: bestArrangement
+        role: receive
+        focus: 'const g = arrange(sizes, W, anchors, { ...opts, tuning, cache });'
+      - path: src/repoluma/web/js/arrange.js
+        symbol: arrange
+        role: transfer
+        focus:
+          - 'return geometry(items, compact(grid), gap);'
+
+  - id: arrange-asked
+    from: layout
+    to: arrange
+    type: data
+    label: item sizes, weights and anchors
+    certainty: observed
+    exchange: arrangement
+    leg: input
+    refs:
+      - path: src/repoluma/web/js/layout.js
+        symbol: bestArrangement
+        role: transfer
+        focus:
+          - 'const g = arrange(sizes, W, anchors, { ...opts, tuning, cache });'
+      - path: src/repoluma/web/js/arrange.js
+        symbol: arrange
+        role: receive
+        focus:
+          - 'export function arrange(items, W, anchors, opts) {'
+
+  - id: layout-routes
+    from: route-lines
+    to: layout
+    type: data
+    label: line routes
+    certainty: observed
+    exchange: routing
+    leg: result
+    refs:
+      - path: src/repoluma/web/js/layout.js
+        symbol: computeLayout
+        role: receive
+        focus: "const routes = routeNets(L, nets, { thorough: !large });"
+      - path: src/repoluma/web/js/route.js
+        symbol: routeNets
+        role: transfer
+        focus:
+          - 'return segments.map((s) => {'
+
+  - id: routes-asked
+    from: layout
+    to: route-lines
+    type: data
+    label: boxes and connections
+    certainty: observed
+    exchange: routing
+    leg: input
+    refs:
+      - path: src/repoluma/web/js/layout.js
+        symbol: computeLayout
+        role: transfer
+        focus:
+          - 'const routes = routeNets(L, nets, { thorough: !large });'
+      - path: src/repoluma/web/js/route.js
+        symbol: routeNets
+        role: receive
+        focus:
+          - 'export function routeNets(L, nets, opts = {}) {'
+
+  - id: arrange-scores-routes
+    from: route-lines
+    to: arrange
+    type: data
+    label: routing scores of candidate arrangements
+    certainty: observed
+    exchange: route-scoring
+    leg: result
+    refs:
+      - path: src/repoluma/web/js/layout.js
+        symbol: scoreArrangement
+        role: receive
+        focus: 'const routes = lvl.routeAll(requests, requests.length <= 60 ? 1 : 0);'
+
+  - id: scoring-asked
+    from: arrange
+    to: route-lines
+    type: data
+    label: candidate placement and wanted connections
+    certainty: observed
+    exchange: route-scoring
+    leg: input
+    refs:
+      - path: src/repoluma/web/js/layout.js
+        symbol: scoreArrangement
+        role: transfer
+        focus:
+          - 'const routes = lvl.routeAll(requests, requests.length <= 60 ? 1 : 0);'
+      - path: src/repoluma/web/js/route.js
+        symbol: Level.routeAll
+        role: receive
+        focus:
+          - 'routeAll(requests) {'
+
+  - id: lod-uses-layout
+    from: layout
+    to: draw-lod
+    type: data
+    label: boxes and routes
+    certainty: observed
+    refs:
+      - path: src/repoluma/web/js/render.js
+        symbol: Renderer.draw
+        role: receive
+        focus:
+          - 'this.drawSegments(null, view);'
+          - 'for (const id of app.layout.roots) this.drawNode(app.layout.boxes.get(id), view, false);'
+
+  - id: lod-uses-camera
+    from: camera
+    to: draw-lod
+    type: data
+    label: zoom and position
+    certainty: observed
+    refs:
+      - path: src/repoluma/web/js/render.js
+        symbol: Renderer.drawNode
+        role: receive
+        focus:
+          - 'const px = cam.z * box.scale;'
+          - 'const [sx, sy] = cam.toScreen(box.x, box.y);'
+
+  - id: panes-placed-by-lod
+    from: draw-lod
+    to: code-panes
+    type: data
+    label: visible panes
+    certainty: observed
+    refs:
+      - path: src/repoluma/web/js/render.js
+        symbol: Renderer.drawPane
+        role: origin
+        focus: "this.visiblePanes.push({ pane, px, sx, sy, dom: fontPx >= PANE_DOM_MIN_FONT });"
+      - path: src/repoluma/web/js/main.js
+        symbol: App.requestRender
+        role: transfer
+        focus: 'this.panes.update(this.renderer.visiblePanes);'
+
+  - id: cache-requests-source
+    from: http-api
+    to: source-cache
+    type: data
+    label: excerpts (/api/source)
+    certainty: observed
+    exchange: excerpt-request
+    leg: response
+    refs:
+      - path: src/repoluma/web/js/panes.js
+        symbol: SourceCache
+        role: receive
+        focus:
+          - 'this.api(`/api/source?path=${encodeURIComponent(job.path)}&start=${job.start}&end=${job.end}`)'
+          - 'else { entry.state = "done"; entry.data = data; }'
+
+  - id: excerpt-asked
+    from: source-cache
+    to: http-api
+    type: data
+    label: path and line range
+    certainty: observed
+    exchange: excerpt-request
+    leg: input
+    refs:
+      - path: src/repoluma/web/js/panes.js
+        symbol: SourceCache
+        role: transfer
+        focus:
+          - 'this.api(`/api/source?path=${encodeURIComponent(job.path)}&start=${job.start}&end=${job.end}`)'
+      - path: src/repoluma/server.py
+        symbol: make_handler
+        role: receive
+        focus:
+          - 'rel = query.get("path", [""])[0]'
+
+  - id: panes-fetch
+    from: source-cache
+    to: code-panes
+    type: data
+    label: source lines
+    certainty: observed
+    exchange: pane-loading
+    leg: response
+    refs:
+      - path: src/repoluma/web/js/panes.js
+        symbol: PaneLayer.update
+        role: receive
+        focus: 'const data = this.app.sources.peek(v.pane);'
+
+  - id: panes-wanted
+    from: code-panes
+    to: source-cache
+    type: data
+    label: panes to load
+    certainty: observed
+    exchange: pane-loading
+    leg: input
+    refs:
+      - path: src/repoluma/web/js/panes.js
+        symbol: PaneLayer.update
+        role: transfer
+        focus:
+          - 'if (data === undefined) this.app.sources.want(v.pane);'
+      - path: src/repoluma/web/js/panes.js
+        symbol: SourceCache.want
+        role: receive
+        focus:
+          - 'this.queue.push({ key, path: pane.ref.path, start, end });'
+
+  - id: panes-highlight
+    from: highlight
+    to: code-panes
+    type: data
+    label: highlighted tokens
+    certainty: observed
+    exchange: tokenizing
+    leg: result
+    refs:
+      - path: src/repoluma/web/js/panes.js
+        symbol: PaneLayer
+        role: receive
+        focus: 'for (const [cls, t] of tokenize(data.lines[i], lang)) {'
+      - path: src/repoluma/web/js/highlight.js
+        symbol: tokenize
+        role: transfer
+        focus:
+          - 'return out;'
+
+  - id: tokenize-asked
+    from: code-panes
+    to: highlight
+    type: data
+    label: source line and language
+    certainty: observed
+    exchange: tokenizing
+    leg: input
+    refs:
+      - path: src/repoluma/web/js/panes.js
+        symbol: PaneLayer
+        role: transfer
+        focus:
+          - 'for (const [cls, t] of tokenize(data.lines[i], lang)) {'
+      - path: src/repoluma/web/js/highlight.js
+        symbol: tokenize
+        role: receive
+        focus:
+          - 'export function tokenize(line, lang) {'
+
+  - id: evidence-loads-source
+    from: http-api
+    to: line-evidence
+    type: data
+    label: cited sites and their code
+    summary: The focus status of each cited site comes with the analysis; the code around it is fetched when the line is inspected.
+    certainty: observed
+    exchange: evidence-request
+    leg: response
+    refs:
+      - path: src/repoluma/web/js/ui.js
+        symbol: evidenceCard
+        role: receive
+        focus: 'const anchors = ref.anchors || [];'
+      - path: src/repoluma/web/js/ui.js
+        symbol: loadExcerpt
+        role: receive
+        focus:
+          - 'const data = await app.fetchSource(ref.path, lo, hi)'
+          - 'if (app.selection?.type !== "relationship" || app.selection.id !== relId || !root.isConnected) return;'
+
+  - id: evidence-asked
+    from: line-evidence
+    to: http-api
+    type: data
+    label: cited path and line range
+    certainty: observed
+    exchange: evidence-request
+    leg: input
+    refs:
+      - path: src/repoluma/web/js/ui.js
+        symbol: loadExcerpt
+        role: transfer
+        focus:
+          - 'const data = await app.fetchSource(ref.path, lo, hi)'
+      - path: src/repoluma/server.py
+        symbol: make_handler
+        role: receive
+        focus:
+          - 'rel = query.get("path", [""])[0]'
+
+  - id: target-selects-line
+    from: line-targets
+    to: line-evidence
+    type: data
+    label: the picked line's id
+    certainty: observed
+    refs:
+      - path: src/repoluma/web/js/main.js
+        symbol: App.onClick
+        role: transfer
+        focus: 'if (route.members.length === 1) this.select({ type: "relationship", id: route.members[0].id });'
+      - path: src/repoluma/web/js/render.js
+        symbol: Renderer.hitRoute
+        role: origin
+        focus: "if (sx >= h.x0 && sx <= h.x1 && sy >= h.y0 && sy <= h.y1) return { ...h, label: true };"
+
+  - id: list-selects-line
+    from: lines-list
+    to: line-evidence
+    type: data
+    label: the chosen line's id
+    certainty: observed
+    refs:
+      - path: src/repoluma/web/js/ui.js
+        symbol: renderConnections
+        role: transfer
+        focus: 'onclick: () => app.select({ type: "relationship", id: r.id })'
+
+  - id: panels-show-diagnostics
+    from: diagnostics
+    to: panels
+    type: error
+    label: diagnostics
+    certainty: observed
+    refs:
+      - path: src/repoluma/web/js/ui.js
+        symbol: renderCoverage
+        role: receive
+        focus: 'const diags = d.diagnostics || [];'
+
+  - id: panels-impact
+    from: impact
+    to: panels
+    type: data
+    label: review candidates
+    certainty: observed
+    exchange: impact-panel
+    leg: result
+    refs:
+      - path: src/repoluma/web/js/ui.js
+        symbol: renderNode
+        role: receive
+        focus: 'const impact = computeImpact(app, id);'
+      - path: src/repoluma/web/js/ui.js
+        symbol: computeImpact
+        role: transfer
+        focus:
+          - 'return { items: [...seen.entries()].map(([nid, path]) => ({ id: nid, path })), considered };'
+
+  - id: impact-asked
+    from: panels
+    to: impact
+    type: data
+    label: the selected node
+    certainty: observed
+    exchange: impact-panel
+    leg: input
+    refs:
+      - path: src/repoluma/web/js/ui.js
+        symbol: renderNode
+        role: transfer
+        focus:
+          - 'const impact = computeImpact(app, id);'
+      - path: src/repoluma/web/js/ui.js
+        symbol: computeImpact
+        role: receive
+        focus:
+          - 'export function computeImpact(app, id) {'
+
+  - id: summary-uses-impact
+    from: impact
+    to: agent-summary
+    type: data
+    label: review candidates
+    certainty: observed
+    exchange: impact-summary
+    leg: result
+    refs:
+      - path: src/repoluma/web/js/main.js
+        symbol: App.agentSummary
+        role: receive
+        focus: 'const impact = computeImpact(this, id);'
+
+  - id: summary-impact-asked
+    from: agent-summary
+    to: impact
+    type: data
+    label: the selected node
+    certainty: observed
+    exchange: impact-summary
+    leg: input
+    refs:
+      - path: src/repoluma/web/js/main.js
+        symbol: App.agentSummary
+        role: transfer
+        focus:
+          - 'const impact = computeImpact(this, id);'
+      - path: src/repoluma/web/js/ui.js
+        symbol: computeImpact
+        role: receive
+        focus:
+          - 'export function computeImpact(app, id) {'
+
+  - id: summary-links
+    from: view-links
+    to: agent-summary
+    type: data
+    label: view links
+    certainty: observed
+    refs:
+      - path: src/repoluma/web/js/main.js
+        symbol: App.agentSummary
+        role: receive
+        focus: "lines.push(`View: ${location.href}`);"
+
   - {id: summary-to-agent, from: agent-summary, to: coding-agent, type: data, label: "ids, refs and links (pasted)"}
   - {id: developer-explores, from: developer, to: camera, type: data, label: "wheel, drag and keys"}
+
   # control: from starts or drives to (no data movement says it)
-  - {id: change-detection-reanalyzes, from: change-detection, to: analysis, type: control, kind: triggers, label: when stats change, evidence: observed}
+  - id: change-detection-reanalyzes
+    from: change-detection
+    to: analysis
+    type: control
+    kind: triggers
+    label: when stats change
+    certainty: observed
+    refs:
+      - path: src/repoluma/server.py
+        symbol: ViewerState.analysis
+        role: transfer
+        focus: "if force or self._analysis is None or self._tokens_now() != self._tokens:"
   - {id: developer-copies, from: developer, to: agent-summary, type: control, kind: triggers, label: Copy for agent}
+
   # dependency: from relies on, implements or is constrained or checked by to
-  - {id: guide-documents-format, from: authoring-guide, to: map-format, type: dependency, kind: documents, evidence: observed}
-  - {id: integrity-enforces-format, from: check-integrity, to: map-format, type: dependency, kind: enforces, evidence: observed}
-  - {id: resolve-confined, from: resolve-ref, to: confinement, type: dependency, kind: relies_on, evidence: observed}
-  - {id: api-guarded, from: http-api, to: request-guard, type: dependency, kind: enforces, evidence: observed}
-  - {id: api-source-confined, from: http-api, to: confinement, type: dependency, kind: relies_on, label: referenced or owned files only, evidence: observed}
-  - {id: layout-constant-scale, from: layout, to: constant-scale, type: dependency, kind: enforces, evidence: observed}
-  - {id: flows-use-routes, from: flow-overlay, to: route-lines, type: dependency, kind: depends_on, label: steps drawn on relationship lines, evidence: observed}
-  - {id: filters-affect-lines, from: route-lines, to: filters, type: dependency, kind: relies_on, label: hidden relationship types, evidence: observed}
+  - {id: guide-documents-format, from: authoring-guide, to: map-format, type: dependency, kind: documents, certainty: observed}
+  - {id: integrity-enforces-format, from: check-integrity, to: map-format, type: dependency, kind: enforces, certainty: observed}
+  - {id: connections-enforce-format, from: check-connections, to: map-format, type: dependency, kind: enforces, certainty: observed}
+  - {id: integrity-uses-vocabulary, from: check-integrity, to: format-vocabulary, type: dependency, kind: relies_on, certainty: observed}
+  - {id: resolve-confined, from: resolve-ref, to: confinement, type: dependency, kind: relies_on, certainty: observed}
+  - {id: api-guarded, from: http-api, to: request-guard, type: dependency, kind: enforces, certainty: observed}
+  - {id: api-source-confined, from: http-api, to: confinement, type: dependency, kind: relies_on, label: referenced or owned files only, certainty: observed}
+  - {id: layout-constant-scale, from: layout, to: constant-scale, type: dependency, kind: enforces, certainty: observed}
+  - {id: flows-use-routes, from: flow-overlay, to: route-lines, type: dependency, kind: depends_on, label: steps drawn on relationship lines, certainty: observed}
+  - {id: filters-affect-lines, from: route-lines, to: filters, type: dependency, kind: relies_on, label: hidden relationship types, certainty: observed}
+  - {id: targets-use-labels, from: line-targets, to: draw-lod, type: dependency, kind: relies_on, label: labels placed in the last frame, certainty: observed}
   - {id: agent-follows-links, from: coding-agent, to: view-links, type: dependency, kind: relies_on, label: ids in pasted summaries}
 
 flows:
   - id: flow-authoring-loop
     label: Author a map with an agent
     summary: From an unmapped repository to a validated map.
-    evidence: observed
+    certainty: observed
     steps:
       - {id: init, node: first-run, label: Developer runs init and copies the prompt}
       - {id: guide, node: authoring-guide, label: Agent reads the guide that matches the installed version, via: agent-reads-guide}
@@ -716,7 +1899,7 @@ flows:
   - id: flow-open-and-zoom
     label: Open the map and zoom to code
     summary: What happens between `repoluma serve` and readable source inside the map.
-    evidence: observed
+    certainty: observed
     steps:
       - {id: serve, node: request-guard, label: serve binds loopback and creates the page token}
       - {id: bootstrap, node: http-api, label: Page requests /api/bootstrap with the token}
@@ -732,7 +1915,7 @@ flows:
   - id: flow-refresh
     label: Refresh after a source change
     summary: Editing a referenced file or the map updates the open page without a restart.
-    evidence: observed
+    certainty: observed
     steps:
       - {id: poll, node: http-api, label: Page polls /api/status every 1.5 s}
       - {id: detect, node: change-detection, label: Stat tokens of the map and referenced files changed}

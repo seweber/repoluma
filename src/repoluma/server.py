@@ -116,6 +116,15 @@ def make_handler(state: ViewerState, token: str, allowed_hosts: set[str]):
     class Handler(BaseHTTPRequestHandler):
         server_version = f"repoluma/{__version__}"
         sys_version = ""
+        # HTTP/1.1 keep-alive: every response has a Content-Length and the client (or a port
+        # forwarder in between) closes the connection when it has read it. Closing right after
+        # writing, as HTTP/1.0 does, let VS Code's port forwarding lose all but the first
+        # 16 KB of larger responses (the stylesheet, main.js).
+        protocol_version = "HTTP/1.1"
+        timeout = 60  # an idle keep-alive connection releases its thread after this
+        # headers and body are separate writes; without this, each response on a kept-alive
+        # connection waits ~40 ms for the client's delayed acknowledgement (Nagle)
+        disable_nagle_algorithm = True
 
         def log_message(self, fmt, *args):  # quiet by default
             if getattr(self.server, "verbose", False):
@@ -159,6 +168,7 @@ def make_handler(state: ViewerState, token: str, allowed_hosts: set[str]):
             self.do_GET()
 
         def do_POST(self):
+            self.close_connection = True  # any request body stays unread: do not reuse
             self._error(HTTPStatus.METHOD_NOT_ALLOWED, "method", "read-only server")
 
         do_PUT = do_DELETE = do_PATCH = do_POST
@@ -251,6 +261,43 @@ def create_server(workspace: Workspace, host: str = "127.0.0.1", port: int = 0):
     return httpd, f"http://{display_host}:{real_port}/", token
 
 
+def open_browser_quietly(url: str) -> None:
+    """Open the viewer in a browser without letting a failing helper flood the terminal.
+
+    A `$BROWSER` helper (VS Code sets one in dev containers and remote sessions) runs with
+    its output discarded; if it fails (for example a stale VS Code connection in an old
+    terminal), one line says to open the URL by hand. Without `$BROWSER`, the standard
+    library picks a browser.
+    """
+    import os
+    import shlex
+    import subprocess
+    import webbrowser
+
+    helper = os.environ.get("BROWSER")
+    if not helper:
+        try:
+            ok = webbrowser.open(url)
+        except Exception:  # noqa: BLE001 - no browser is not an error
+            ok = False
+        if not ok:
+            print(f"  (no browser found: open {url} yourself)", flush=True)
+        return
+    for cmd in helper.split(os.pathsep):  # $BROWSER may list several, like webbrowser does
+        args = [a.replace("%s", url) for a in shlex.split(cmd)]
+        if not any("%s" in a for a in shlex.split(cmd)):
+            args.append(url)
+        try:
+            done = subprocess.run(args, stdin=subprocess.DEVNULL, stdout=subprocess.DEVNULL,
+                                  stderr=subprocess.DEVNULL, timeout=15, check=False)
+        except (OSError, subprocess.SubprocessError):
+            continue
+        if done.returncode == 0:
+            return
+    print(f"  (could not open a browser through $BROWSER; open {url} yourself, or restart "
+          "with --no-open. In VS Code, a new terminal usually fixes this.)", flush=True)
+
+
 def serve(
     workspace: Workspace,
     host: str = "127.0.0.1",
@@ -258,8 +305,6 @@ def serve(
     open_browser: bool = True,
     verbose: bool = False,
 ) -> None:
-    import webbrowser
-
     httpd, url, _ = create_server(workspace, host, port)
     httpd.verbose = verbose
     print(f"repoluma {__version__} viewing {workspace.root}")
@@ -280,7 +325,7 @@ def serve(
     )
     httpd.state.analysis()  # warm the cache so the first page load is quick
     if open_browser:
-        threading.Timer(0.3, lambda: webbrowser.open(url)).start()
+        threading.Timer(0.3, open_browser_quietly, args=(url,)).start()
     try:
         httpd.serve_forever(poll_interval=0.25)
     except KeyboardInterrupt:

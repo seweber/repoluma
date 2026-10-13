@@ -1,6 +1,6 @@
 """End-to-end journey in a real browser (skipped when Playwright/Chromium are unavailable).
 
-uv run --with playwright pytest tests/test_e2e_browser.py
+uv run pytest tests/test_e2e_browser.py
 """
 
 import re
@@ -213,12 +213,12 @@ def test_flow_steps_and_agent_summary(page):
     pg.locator(".flow-card", has_text="Place an order").locator("button", has_text="Show").click()
     time.sleep(1.2)
     assert pg.is_visible("#flowbar")
-    assert "1 / 9" in pg.inner_text("#flowbar")
+    assert "1 / 13" in pg.inner_text("#flowbar")
     pg.click("#flowbar button[aria-label^='Next']")
     pg.keyboard.press("n")
     time.sleep(1.2)
     assert pg.evaluate("window.repoluma.flowStep") == 2
-    assert "3 / 9" in pg.inner_text("#flowbar")
+    assert "3 / 13" in pg.inner_text("#flowbar")
     assert "f=flow-place-order%2C2" in pg.url or "f=flow-place-order,2" in pg.url
     summary = pg.evaluate("window.repoluma.agentSummary('place-order')")
     assert "`place-order`" in summary and "shop/orders.py#OrderService.place_order" in summary
@@ -522,3 +522,187 @@ def test_the_file_view_says_which_pane_shows_each_line(page):
       return r.top >= c.top && r.bottom <= c.bottom; })()""")
     assert pg.locator(".file-view h2").is_visible()
     assert "belongs to" in pg.inner_text("#inspector").lower()
+
+
+# ------------------------------------------------------------- data exchanges
+
+ZOOM_TO_PAYMENT = """(() => { const a = window.repoluma;
+  const r = (id) => { const b = a.layout.boxes.get(id); return { x: b.x, y: b.y, w: b.w * b.scale, h: b.h * b.scale }; };
+  const p = r('place-order'), q = r('authorize-payment');
+  const x = Math.min(p.x, q.x), y = Math.min(p.y, q.y);
+  a.camera.set(a.camera.fitState({ x, y, w: Math.max(p.x + p.w, q.x + q.w) - x,
+    h: Math.max(p.y + p.h, q.y + q.h) - y }, 0.05, a.insets())); })()"""
+
+LABEL_AT = """(id) => { const a = window.repoluma, st = document.querySelector('#stage').getBoundingClientRect();
+  const h = a.renderer.labelHits.find((h) => h.members.length === 1 && h.members[0].id === id);
+  return h ? [st.left + (h.x0 + h.x1) / 2, st.top + (h.y0 + h.y1) / 2] : null; }"""
+
+
+def test_data_label_opens_its_evidence_without_moving_the_map(page):
+    pg, _ = page
+    pg.evaluate(ZOOM_TO_PAYMENT)
+    # zoom in until the label has room (it depends on the viewport and fonts)
+    for _ in range(6):
+        time.sleep(0.3)
+        if pg.evaluate(LABEL_AT, "order-authorizes"):
+            break
+        pg.evaluate("window.repoluma.zoomBy(1.25)")
+    x, y = pg.evaluate(LABEL_AT, "order-authorizes")
+    before = cam(pg)
+    pg.mouse.click(x, y)
+    wait(pg, "window.repoluma.selection?.id === 'order-authorizes'")
+    time.sleep(0.4)
+    assert cam(pg) == before  # the camera stays where it was
+    insp = pg.inner_text("#inspector").lower()  # section titles are upper-cased by CSS
+    assert "payment token and total" in insp and "exchange" in insp
+    assert "authorization" in insp and "decline reason" in insp
+    # the exact call site, highlighted inside readable code
+    wait(pg, "[...document.querySelectorAll('.ev-card.role-transfer')].some((c) => c.querySelector('.ev-mark'))")
+    marked = pg.evaluate("[...document.querySelectorAll('.ev-mark')].map((m) => m.textContent).join('')")
+    assert "self.payments.authorize(payment_token, total)" in marked
+    # the other legs of the exchange are highlighted, more quietly
+    assert pg.evaluate("[...window.repoluma.renderer.pairFocus].sort()") == ["authorization-returned", "payment-declined"]
+    assert "r%3Aorder-authorizes" in pg.url or "r:order-authorizes" in pg.url
+    summary = pg.evaluate("window.repoluma.relationshipSummary('order-authorizes')")
+    assert "Exchange `payment-authorization` (input)" in summary
+    assert '"self.payments.authorize(payment_token, total)" found at line' in summary
+    # move to the result leg from the inspector, then back
+    pg.locator(".legs button", has_text="authorization").click()
+    wait(pg, "window.repoluma.selection?.id === 'authorization-returned'")
+    assert "taken in" in pg.inner_text("#inspector").lower()
+    pg.click(".insp-back")
+    wait(pg, "window.repoluma.selection?.id === 'order-authorizes'")
+
+
+def test_missing_evidence_is_said_not_replaced(page):
+    pg, _ = page
+    pg.evaluate("window.repoluma.select({ type: 'relationship', id: 'customer-returns' })")
+    text = pg.inner_text("#inspector")
+    assert "No site is cited" in text
+    assert not pg.query_selector(".ev-card")
+
+
+def test_lines_tab_reaches_every_line_by_keyboard(page):
+    pg, _ = page
+    pg.click("#sidebar [role=tab] >> text=Lines")
+    assert pg.locator(".conn-item").count() == pg.evaluate("window.repoluma.model.relationships.length")
+    assert "EXCHANGES (5)" in pg.inner_text("#tab-connections").upper()
+    before = cam(pg)
+    item = pg.locator(".conn-item[data-id='payment-declined']")
+    item.focus()
+    pg.keyboard.press("Enter")
+    wait(pg, "window.repoluma.selection?.id === 'payment-declined'")
+    assert cam(pg) == before
+    assert "decline reason" in pg.inner_text("#inspector")
+
+
+def test_overview_line_names_its_true_ends(page):
+    pg, _ = page
+    wait(pg, "(window.repoluma.renderer.hitSegs || []).length > 0")
+    point = pg.evaluate("""(() => { const a = window.repoluma, st = document.querySelector('#stage').getBoundingClientRect();
+      const h = a.renderer.hitSegs.find((h) => h.members.length === 1 && h.members[0].id === 'order-authorizes');
+      if (!h) return null;
+      let best = null;
+      for (let i = 1; i < h.pts.length; i++) {
+        const [p, q] = [h.pts[i - 1], h.pts[i]], len = Math.hypot(q[0] - p[0], q[1] - p[1]);
+        if (!best || len > best[2]) best = [(p[0] + q[0]) / 2, (p[1] + q[1]) / 2, len];
+      }
+      return [st.left + best[0], st.top + best[1]]; })()""")
+    assert point, "the overview draws the payment input line"
+    # at overview the line ends on the regions; its tooltip names the items it connects
+    pg.mouse.move(*point)
+    wait(pg, "!document.querySelector('#tip').hidden")
+    tip = pg.inner_text("#tip")
+    assert "Place order → Payment authorization" in tip
+
+
+def test_renamed_selection_is_explained(page):
+    pg, shop = page
+    pg.evaluate("window.repoluma.select({ type: 'relationship', id: 'payment-declined' })")
+    path = shop / ".repoluma/map.yaml"
+    text = path.read_text()
+    path.write_text(text.replace("id: payment-declined", "id: authorization-declined")
+                    .replace("via: payment-declined", "via: authorization-declined"))
+    wait(pg, "!window.repoluma.relById.has('payment-declined')", timeout=15)
+    assert "NO LONGER IN THE MAP" in pg.inner_text("#inspector").upper()
+    assert "payment-declined" in pg.inner_text("#inspector")
+
+
+def test_exchange_is_one_route_drawn_as_two_lanes(page):
+    pg, _ = page
+    pg.evaluate(ZOOM_TO_PAYMENT)
+    time.sleep(0.5)
+    route = pg.evaluate("""(() => { const s = window.repoluma.layout.routes.find((s) => s.members.some((m) => m.id === 'order-authorizes'));
+      return { pair: s.pair, ids: s.members.map((m) => m.id).sort() }; })()""")
+    # input and result share one route; the error leg has a route of its own
+    assert route == {"pair": True, "ids": ["authorization-returned", "order-authorizes"]}
+    # each lane is its own click target, so the two directions are picked separately
+    lanes = pg.evaluate("""window.repoluma.renderer.hitSegs.filter((h) => h.members.length === 1 &&
+      ['order-authorizes', 'authorization-returned'].includes(h.members[0].id)).map((h) => h.members[0].id)""")
+    assert {"order-authorizes", "authorization-returned"} <= set(lanes)
+    for rid in ("order-authorizes", "authorization-returned"):
+        x, y = pg.evaluate(LABEL_AT, rid) or (None, None)
+        if x is None:
+            continue  # the label had no room at this zoom; the lane is still clickable
+        pg.mouse.click(x, y)
+        wait(pg, f"window.repoluma.selection?.id === '{rid}'")
+
+
+def test_lanes_of_a_pair_keep_clear_of_neighbouring_lines(selfmap):
+    """Lanes take room: a lane keeps min(sep, 6 px) clear of another line, or as much as the
+    two routes themselves have where the router had to put them closer (a crowded box side)."""
+    pg = selfmap
+    worst = pg.evaluate("""(async () => {
+      const a = window.repoluma, frame = () => new Promise((r) => requestAnimationFrame(r));
+      const fit = a.camera.fitState(a.layout.bounds, 0.05, a.insets());
+      const b = a.layout.boxes.get('serve');
+      const runs = (pts) => { const o = []; for (let i = 1; i < pts.length; i++) o.push([pts[i - 1], pts[i]]); return o; };
+      // closest parallel distance between two polylines along a shared stretch (or Infinity)
+      const gap = (P, Q) => { let d = Infinity;
+        for (const [p, q] of runs(P)) for (const [r, s] of runs(Q)) for (const ax of [0, 1]) {
+          const o = 1 - ax;
+          if (Math.abs(p[o] - q[o]) > 0.01 || Math.abs(r[o] - s[o]) > 0.01) continue;
+          const lo = Math.max(Math.min(p[ax], q[ax]), Math.min(r[ax], s[ax]));
+          const hi = Math.min(Math.max(p[ax], q[ax]), Math.max(r[ax], s[ax]));
+          if (hi - lo > 1) d = Math.min(d, Math.abs(p[o] - r[o]));
+        }
+        return d; };
+      let worst = Infinity;
+      for (const f of [1, 1.6, 2.5, 4]) {
+        const z = fit.z * f;
+        a.camera.set({ z, x: b.x - 40 / z, y: b.y - 60 / z });
+        await frame(); await frame();
+        const hs = a.renderer.hitSegs;
+        for (let i = 0; i < hs.length; i++) for (let j = i + 1; j < hs.length; j++) {
+          const g = hs[i], k = hs[j];
+          if (g.route === k.route) continue; // the two lanes of one pair
+          const drawn = gap(g.pts, k.pts);
+          if (drawn === Infinity) continue;
+          const allowed = Math.min(Math.min(g.sep, k.sep, 6), gap(g.center, k.center));
+          worst = Math.min(worst, drawn - allowed);
+        }
+      }
+      return worst; })()""")
+    assert worst >= -0.05, worst
+
+
+
+def test_pairs_between_regions_have_equal_wide_lanes(page):
+    """Outside the regions every pair's lanes are equally far apart at a given zoom."""
+    pg, _ = page
+    spreads = pg.evaluate("""(async () => {
+      const a = window.repoluma, frame = () => new Promise((r) => requestAnimationFrame(r));
+      const fit = a.camera.fitState(a.layout.bounds, 0.05, a.insets());
+      const out = [];
+      for (const f of [1, 2, 4]) {
+        a.camera.set({ ...fit, z: fit.z * f });
+        await frame(); await frame();
+        const widths = a.renderer.hitSegs.filter((h) => h.piece?.pair && h.piece.container == null)
+          .map((h) => Math.min(...h.center.map((q) => Math.hypot(q[0] - h.pts[0][0], q[1] - h.pts[0][1]))));
+        out.push([f, widths.length, Math.min(...widths), Math.max(...widths)]);
+      }
+      return out; })()""")
+    for f, n, lo, hi in spreads:
+        if n:
+            assert hi - lo < 0.05, (f, lo, hi)
+    assert any(n for _, n, _, _ in spreads), "the shop has pairs between its regions"

@@ -78,3 +78,51 @@ def test_git_config_cannot_run_commands(tmp_path):
     git(tmp_path, "config", "core.fsmonitor", f"touch {marker}; false")
     Workspace.open(tmp_path).analyze()
     assert not marker.exists()
+
+
+def test_focus_text_since_review(tmp_path):
+    write(tmp_path, "app/pay.py", "def pay(token, total):\n    return gateway.charge(token, total)\n")
+    git(tmp_path, "init", "-q")
+    git(tmp_path, "add", ".")
+    git(tmp_path, "commit", "-qm", "init")
+    rev = git(tmp_path, "rev-parse", "HEAD").strip()
+    write(tmp_path, ".repoluma/map.yaml", f"""
+        schema_version: 3
+        scope: {{summary: s, reviewed_revision: {rev}}}
+        nodes:
+          - {{id: a, label: A}}
+          - {{id: b, label: B}}
+        relationships:
+          - id: charge
+            from: a
+            to: b
+            type: data
+            label: token and total
+            certainty: observed
+            refs:
+              - {{path: app/pay.py, symbol: pay, role: transfer, focus: "gateway.charge(token, total)"}}
+              - {{path: app/pay.py, symbol: pay, role: receive, focus: "def pay(token, total, retries=1):"}}
+    """)
+
+    def anchors():
+        a = Workspace.open(tmp_path).analyze()
+        refs = a["model"]["relationships"][0]["refs"]
+        return [x["anchors"][0] for x in refs], {d["code"] for d in a["diagnostics"]}
+
+    (first, second), codes = anchors()
+    assert first["since_review"] == "unchanged" and second["status"] == "missing"
+    # the file changes: the old statement is still there, the new signature is new
+    write(tmp_path, "app/pay.py",
+          "def pay(token, total, retries=1):\n    return gateway.charge(token, total)\n")
+    (first, second), codes = anchors()
+    assert (first["status"], first["since_review"]) == ("found", "text_unchanged")
+    assert (second["status"], second["since_review"]) == ("found", "text_new")
+    # the statement moves into a helper: reported where it is now, not followed there
+    write(tmp_path, "app/pay.py", "def pay(token, total, retries=1):\n    return _go(token, total)\n\n\n"
+          "def _go(token, total):\n    return gateway.charge(token, total)\n")
+    (first, second), codes = anchors()
+    assert first["status"] == "missing" and first["elsewhere"] == [6] and "focus-missing" in codes
+    # deleted entirely
+    write(tmp_path, "app/pay.py", "def pay(token, total, retries=1):\n    return None\n")
+    (first, _), _ = anchors()
+    assert first["status"] == "missing" and not first.get("elsewhere")

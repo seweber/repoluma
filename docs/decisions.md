@@ -437,6 +437,127 @@ alone, short, and a final check of the flat list. Both bundled maps were relabel
 **Revisit if** human readers disagree with the agent readers (the test used one model
 family as writer, reader and judge), or maps in other domains show labels drifting long.
 
+## 13. Lines end on items, exchanges pair them, and every data line points at its code
+
+**Problem.** A reader could see that "payment token and total" goes from Place order to
+Payment authorization, but not where in the code that happens, what comes back, or whether
+the line was more than an impression: neither bundled map cited a single site for any of
+its 75 relationships. "Check map structure" cited all of `model.py`, so coverage was
+complete while saying nothing about most of it. Nothing stopped a line from ending on a
+container, and opposite lines were "pairs" only by appearance.
+
+**Choice** (schema version 3), keeping the format as close to version 2 as the meaning
+allows:
+
+- *Containers and items are derived, not declared.* A node with children explains; a node
+  without acts. Lines may not end on containers (an error in version 3, a note in version
+  2). We considered separate `groups` and `entities` collections (the implementation brief
+  recommended them) and an explicit `role` field; both duplicate what the tree already says
+  and can contradict it, and both maps already followed the rule without exception.
+- *Exchanges are flat legs with a shared id.* `exchange: payment-authorization` and
+  `leg: input | result | response | error` on ordinary relationships. The alternative,
+  an `exchanges` collection owning nested legs, was the brief's default; on the shop it
+  turned two lines of YAML per call into about 35, changed where flows and links find
+  relationship ids, and needed a second normalization path. Flat legs keep every id, every
+  flow `via` and the viewer's line model unchanged. Pairing is never inferred.
+- *Cited sites are refs with a role and focus text.* Roles `transfer`, `receive`, `origin`
+  (three, not the five the brief suggested: "construction" and "origin" were the same
+  thing in every example, and "consumption" was always the receive site). `focus` is exact
+  text, unique within the ref's symbol or range, whitespace-normalized. We did not use line
+  ranges (they drift silently) or an expression selector language (not needed by any
+  example; the text anchors failed honestly in every edit we tried). An `observed` data
+  line without a site is a warning, not an error, so existing maps stay usable while they
+  are being grounded; `--strict` (and the self-map test) treat it as a failure.
+- *`evidence` became `certainty`* in version 3, because "evidence" was also what refs are.
+- *Broad coverage is disclosed, not forbidden.* Whole-file and whole-class refs still
+  account for code; each one lists the definitions it covers without describing them, and
+  definitions added inside one since `scope.reviewed_revision` are a warning. We did not
+  add an authored inventory or checkpoint file: the reviewed revision plus `git show` is a
+  real baseline, and without one the viewer says that freshness is unknown.
+- *Migration is two activities.* Version 2 maps load unchanged. `repoluma migrate` does
+  only the mechanical part (in a new file by default) and lists the decisions that need the
+  code; the bundled maps were migrated by reading the code.
+
+**Viewer.** Labels and bundle badges are click targets for exactly their line (they were
+drawn but not hit-testable); clicking keeps the camera, frames the label, and highlights
+the exchange's other legs more quietly. The inspector shows the leg, its exchange, and each
+cited site with the focused text highlighted inside a few lines of context, loaded on
+demand, stale answers dropped; "show all" expands the context without changing what is
+highlighted. A line without a cited site says so instead of showing a function. Hovering a
+line names its real ends (at overview it ends on regions). A Lines tab lists every
+relationship, exchanges first, for keyboard and screen-reader access and for lines whose
+labels did not fit. A selection that disappears after a refresh (or an old link) says that
+the id is gone. "Copy for agent" covers lines, with sites and their status. Information about
+something going wrong (raised exceptions and error values, and reported problems such as
+validation diagnostics) is a relationship type of its own, `error`, drawn red and dashed
+on a route of its own:
+first drawn as data, a result and its error leg shared one line marked `×2`, which hid
+both payloads and made the failure look like a normal result. A few data lines sharing a
+route are labelled with each payload instead of `×n`. The dotted style for unconfirmed
+lines is drawn (and listed in the legend) only while uncertainty is highlighted, so dashes
+on the map mean failure.
+
+**Pair lanes.** At first not built: the router tended to put opposite legs side by side,
+and pairs were rare. Completing the self-map's exchanges (most of its one-way lines were in
+fact the answers of calls whose request was never drawn) changed that. Now the input and
+the result (or response) of one exchange are routed once, from caller to callee, and the
+renderer draws that route as two lanes offset to either side, each with its own arrow,
+label, click target and flow highlight; error legs keep their own red dashed route. In
+placement a pair pulls like one line (each leg weighs 1/n), otherwise the extra legs
+rearranged the overview; for the width of the channels between boxes it counts as 1.3
+lines, since its lanes need more room than one line (counting it as one line left
+regions too tight, and pairs were squeezed into one line where they left a region). A pair is wider than a line: between the top-level regions its lanes lie 0.6·sep either
+side of its route (at most 6 px), the same for every pair at a given zoom; inside regions
+0.3·sep (at most 3 px). The router keeps that much more room around it (in the spots it claims on box sides and region borders, and in
+the spacing pass), and the lanes lie that far from the route, so they shrink with the zoom
+instead of a fixed 3 px (which overlapped neighbouring lines when zoomed out). Where a box
+side is too crowded to keep the room, the router first falls back to the room of a single
+line (rather than straight to sharing a spot), and the renderer narrows that piece's lanes
+(inside regions only: between the top-level regions the router always finds the room, see
+below) so that a gap of min(sep, 6 px) stays to the neighbouring line, down to one line with both
+arrows when zoomed out (each piece on its own: a pair may run as two
+lanes in one region and as one line where the next is crowded), so a lane never comes closer to another line
+than the two routes are (a browser test checks this at four zoom levels). Two router changes make the room
+outside always available: a top-level region's border is crossed by the same line at the
+top level too, so spots on it keep the larger of the two levels' widths (the inside level
+used to offer crossings that had no room for the wider outside lanes); and where every
+straight or L-shaped way out of a region lands on a taken spot, a way out with more bends to
+a free spot is offered as well (it used to be offered only when no straight or L way out
+existed at all, so a crowded border made a pair share a spot). Cost on the self-map: route
+crossings 24 → 30; shop 9 → 10. Measured on the self-map with its 18 new pairs: route crossings
+25 before and 25 after (`bench/layout_eval.py`, `routeCrossings`); counting each lane as a
+drawn line, as `crossings` now does, 57, since every crossing of a pair shows twice. Shop:
+9 route crossings, 11 lane-counted, bends 27 → 20.
+
+**Observed.** Shop: 33 relationships (26 before), 7 exchanges, 28 of 29 data lines cite a
+site (the exception is the customer's return, which has no caller in the repository and
+says so), 53 of 53 focus texts found; layout 9 crossings / 27 bends (8 / 17 before). Two
+claims were corrected while grounding them: the confirmation e-mail only reaches an
+in-memory outbox (now `inferred`), and the checkout result (`order id`, 402 on decline)
+depends on an HTTP handler the repository does not contain (`needs_review`). Seven lines
+were added because the code has them and the target reader tasks (what does a call return,
+what happens on failure, where does an input come from) need them: the cart lines sent to
+pricing, the reservation and the stock shortage coming back from Reserve stock, the decline
+reason, the provider's response, the available quantities read from Stock levels, and the
+order id the form expects back.
+
+Self-map: 61 relationships (49 before), 43 of 48 data lines grounded, all 78 focus texts
+found; 148 Python definitions are covered only by broad refs, which is now visible. Its
+layout went from 8 to 24 crossings. On the old map, one added data line already moves the
+count from 8 to 14 and one added leaf node to 10, so the count follows map size more than
+any one change; but the first version of the new self-map (19 new lines) reached 40 and
+rearranged the overview into a wide row with long detours. We removed six low-value lines
+(four for the one-off migration command, two that only repeat that results end up in the
+analysis payload) and dropped an intermediate grouping that made placement worse; the
+overview arrangement now matches the old one. Remaining crossings are inside the server
+and evidence regions. **Open for the owner:** keep the new self-map lines (24 crossings),
+or document the new behavior with nodes only (closer to 8, but a reader cannot follow the
+new data paths there).
+
+**Revisit if** maps from other agents use legs in ways the four kinds do not cover
+(correlation of asynchronous messages), text anchors fail often on real edits, or readers
+miss lines that the self-map now leaves out.
+
 ## Assumptions (not stated by the brief)
 
 - Desktop browsers first; pinch-zoom works but touch was not tuned.

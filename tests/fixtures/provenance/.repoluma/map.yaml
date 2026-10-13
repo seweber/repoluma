@@ -1,0 +1,235 @@
+# Fixture for repoluma's tests and the authoring guide's worked examples:
+# a configured object built by setters, a setter with side effects, shared mutable state.
+schema_version: 3
+
+repository:
+  name: reports (fixture)
+  description: Builds a monthly report from a request configured with setters, and remembers the last one per user.
+
+scope:
+  summary: Everything in reports/.
+  not_covered:
+    - Who calls monthly_report and last_report (no caller in this fixture)
+
+nodes:
+  - id: reporting
+    kind: capability
+    label: Monthly reports
+    summary: Configure a report request, render it, and remember the result.
+    owns: [reports/]
+
+  - id: build-report
+    parent: reporting
+    kind: responsibility
+    label: Build monthly report
+    summary: Configures a request (title, period, columns, currency), renders it and stores the text.
+    certainty: observed
+    refs:
+      - path: reports/service.py
+        symbol: monthly_report
+
+  - id: report-request
+    parent: reporting
+    kind: data
+    label: Report request
+    summary: Title, period, columns and currency; plain setters except for the currency.
+    certainty: observed
+    refs:
+      - path: reports/request.py
+        symbol: ReportRequest.__init__
+      - path: reports/request.py
+        symbol: ReportRequest.set_title
+      - path: reports/request.py
+        symbol: ReportRequest.set_period
+      - path: reports/request.py
+        symbol: ReportRequest.add_column
+
+  - id: change-currency
+    parent: reporting
+    kind: responsibility
+    label: Change report currency
+    summary: "A setter that is an operation of its own: it rejects unknown currencies and records each change in the audit log."
+    certainty: observed
+    refs:
+      - path: reports/request.py
+        symbol: ReportRequest.set_currency
+      - path: reports/request.py
+        symbol: SUPPORTED_CURRENCIES
+
+  - id: render-report
+    parent: reporting
+    kind: responsibility
+    label: Render report text
+    certainty: observed
+    refs:
+      - path: reports/render.py
+        symbol: render
+
+  - id: audit-log
+    parent: reporting
+    kind: resource
+    label: Audit log entries
+    summary: Append-only list of configuration changes.
+    certainty: observed
+    refs:
+      - path: reports/audit.py
+
+  - id: recent-reports
+    parent: reporting
+    kind: resource
+    label: Last report per user
+    summary: Module-level dictionary shared by building and reading reports.
+    certainty: observed
+    refs:
+      - path: reports/service.py
+        symbol: RECENT
+
+  - id: read-last-report
+    parent: reporting
+    kind: responsibility
+    label: Read last report
+    certainty: observed
+    refs:
+      - path: reports/service.py
+        symbol: last_report
+
+  - id: package
+    parent: reporting
+    kind: component
+    label: Package marker
+    refs:
+      - reports/__init__.py
+
+relationships:
+  # A configured object: the plain setters are summarized as one transfer to the renderer,
+  # with each setting cited as an origin. The currency setter has effects, so it is modeled.
+  - id: request-to-render
+    from: build-report
+    to: render-report
+    type: data
+    label: configured report request
+    summary: Title, period, columns (refunds only for detailed reports) and currency, all set before the call.
+    certainty: observed
+    exchange: render-call
+    leg: input
+    notes: The request object is passed by reference; nothing changes it after render is called.
+    refs:
+      - path: reports/service.py
+        symbol: monthly_report
+        role: origin
+        focus:
+          - 'request = ReportRequest().set_title(f"Monthly report {month.name}")'
+          - request.set_period(month.first, month.last)
+          - request.add_column("revenue")
+          - 'if detailed: request.add_column("refunds")'
+      - path: reports/service.py
+        symbol: monthly_report
+        role: transfer
+        focus: text = render(request)
+      - path: reports/render.py
+        symbol: render
+        role: receive
+        focus:
+          - 'header = f"{request.title} ({request.currency})"'
+          - 'f"{request.period[0]} to {request.period[1]}" if request.period'
+          - '", ".join(request.columns)'
+
+  - id: text-from-render
+    from: render-report
+    to: build-report
+    type: data
+    label: report text
+    certainty: observed
+    exchange: render-call
+    leg: result
+    refs:
+      - path: reports/render.py
+        symbol: render
+        role: transfer
+        focus: 'return "\n".join([header, period, ", ".join(request.columns)])'
+      - path: reports/service.py
+        symbol: monthly_report
+        role: receive
+        focus: text = render(request)
+
+  - id: currency-requested
+    from: build-report
+    to: change-currency
+    type: data
+    label: user's currency code
+    certainty: observed
+    exchange: currency-change
+    leg: input
+    refs:
+      - path: reports/service.py
+        symbol: monthly_report
+        role: transfer
+        focus: request.set_currency(user.currency, audit)
+
+  - id: currency-rejected
+    from: change-currency
+    to: build-report
+    type: error
+    label: unsupported currency
+    certainty: observed
+    exchange: currency-change
+    leg: error
+    summary: Raised before anything is recorded or changed; monthly_report does not catch it.
+    refs:
+      - path: reports/request.py
+        symbol: ReportRequest.set_currency
+        role: transfer
+        focus: 'raise ValueError(f"unsupported currency {code}")'
+
+  - id: currency-audited
+    from: change-currency
+    to: audit-log
+    type: data
+    label: currency change
+    certainty: observed
+    refs:
+      - path: reports/request.py
+        symbol: ReportRequest.set_currency
+        role: transfer
+        focus: audit.record("currency", code)
+      - path: reports/audit.py
+        symbol: AuditLog.record
+        role: receive
+        focus: self.entries.append((field, value))
+
+  - id: report-remembered
+    from: build-report
+    to: recent-reports
+    type: data
+    label: report text per user
+    certainty: observed
+    refs:
+      - path: reports/service.py
+        symbol: monthly_report
+        role: transfer
+        focus: RECENT[user.name] = text
+
+  - id: last-report-read
+    from: recent-reports
+    to: read-last-report
+    type: data
+    label: last report text
+    certainty: observed
+    summary: Whatever monthly_report stored last for the user; None before the first report.
+    refs:
+      - path: reports/service.py
+        symbol: last_report
+        role: receive
+        focus: return RECENT.get(user.name)
+
+flows:
+  - id: flow-monthly
+    label: Build a monthly report
+    certainty: observed
+    steps:
+      - {id: currency, node: change-currency, label: Set and audit the currency, via: currency-requested}
+      - {id: rejected, node: build-report, kind: failure, after: currency, label: "Unknown currency: ValueError", via: currency-rejected}
+      - {id: audit, node: audit-log, after: currency, label: The change is recorded, via: currency-audited}
+      - {id: render, node: render-report, after: currency, label: Render the configured request, via: request-to-render}
+      - {id: text, node: build-report, label: The text comes back, via: text-from-render}
+      - {id: store, node: recent-reports, label: Remember it for the user, via: report-remembered}

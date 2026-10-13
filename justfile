@@ -17,4 +17,4 @@ example:
 # generate stress maps and measure (needs a Playwright Chromium)
 bench:
     uv run python bench/gen_stress.py bench/out
-    uv run --with playwright python bench/run.py src/repoluma/examples/shop . bench/out/broad bench/out/deep bench/out/dense bench/out/longsrc bench/out/huge --json bench/results.local.json
+    uv run python bench/run.py src/repoluma/examples/shop . bench/out/broad bench/out/deep bench/out/dense bench/out/longsrc bench/out/huge --json bench/results.local.json

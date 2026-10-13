@@ -10,7 +10,7 @@
 // rearranges itself while you navigate.
 
 import { CANDIDATES, TUNING, arrange } from "./arrange.js";
-import { Level, quant, routeNets } from "./route.js";
+import { LANE_SEP, LANE_SEP_OUTSIDE, Level, quant, routeNets } from "./route.js";
 
 export const K = 0.4; // child scale relative to parent
 export const PANE_K = 0.55; // code pane scale relative to its node: code is one short zoom away
@@ -67,13 +67,14 @@ export function kindLabel(kind) {
 /** Relationship types and what an arrow from `from` to `to` means for each (legend, filters). */
 export const REL_TYPES = [
   { type: "data", label: "data", arrow: "source → destination, labelled with the data" },
+  { type: "error", label: "error", arrow: "where a failure or problem is raised or found → where it is handled" },
   { type: "control", label: "control", arrow: "who starts it → what is started" },
   { type: "dependency", label: "dependency", arrow: "dependent → what it relies on" },
 ];
 
 /** Short text for a relationship: the data it carries, otherwise its kind or type. */
 export function relText(r) {
-  if (r.type === "data" && r.label) return r.label;
+  if ((r.type === "data" || r.type === "error") && r.label) return r.label;
   return (r.kind || r.type).replace("_", " ");
 }
 
@@ -113,7 +114,7 @@ function headerBlocks(node, measure, width, refInfo) {
     y += lines.length * style.lh;
   };
   const meta = [kindLabel(node.kind).toUpperCase()];
-  if (node.evidence) meta.push(EVIDENCE_LABEL[node.evidence] || node.evidence);
+  if (node.certainty) meta.push(EVIDENCE_LABEL[node.certainty] || node.certainty);
   if (node.confidence) meta.push(`${node.confidence} confidence`);
   push("kind", STYLES.kind, [meta.join("  ·  ")]);
   y += 2;
@@ -367,8 +368,20 @@ function bestArrangement(sizes, W, anchors, titles, opts) {
 export function layoutNets(model) {
   const nets = [];
   const nodes = new Set(model.nodes.map((n) => n.id));
+  // an exchange's request and answer are drawn as one route: together they pull like one line
+  const lanes = new Map();
   for (const r of model.relationships) {
-    if (nodes.has(r.from) && nodes.has(r.to)) nets.push({ id: r.id, from: r.from, to: r.to, rel: r, w: 1 });
+    if (r.exchange && r.type !== "error" && ["input", "result", "response"].includes(r.leg)) {
+      lanes.set(r.exchange, (lanes.get(r.exchange) || 0) + 1);
+    }
+  }
+  for (const r of model.relationships) {
+    if (!nodes.has(r.from) || !nodes.has(r.to)) continue;
+    const n = r.exchange && r.type !== "error" && r.leg !== "error" ? lanes.get(r.exchange) || 1 : 1;
+    // w: how strongly it pulls its ends together; room: how much line space it needs (a
+    // pair's two lanes need more than one line, 1 + 2·LANE_SEP)
+    nets.push({ id: r.id, from: r.from, to: r.to, rel: r, w: 1 / n, room: n > 1 ? (1 + LANE_SEP) / n : 1,
+      roomOutside: n > 1 ? (1 + LANE_SEP_OUTSIDE) / n : 1 });
   }
   return nets;
 }
@@ -400,25 +413,25 @@ export function computeLayout(model, refInfo, measure, opts = {}) {
   const pairW = new Map(); // container id ("" = root) -> Map("a\0b" -> weight)
   const anchorRecs = new Map(); // container id -> [{item, partner (chain or null = header), w}]
   const regionWeight = new Map();
-  const addW = (cid, a, b, w) => {
+  const addW = (cid, a, b, w, room) => {
     if (!pairW.has(cid)) pairW.set(cid, new Map());
     const key = a < b ? a + "\u0000" + b : b + "\u0000" + a;
     const m = pairW.get(cid);
     m.set(key, (m.get(key) || 0) + w);
-    regionWeight.set(cid, (regionWeight.get(cid) || 0) + w);
+    regionWeight.set(cid, (regionWeight.get(cid) || 0) + room); // sizes the channels
   };
   for (const net of nets) {
     const ca = ancestors.get(net.from), cb = ancestors.get(net.to);
     let k = 0;
     while (k < ca.length && k < cb.length && ca[k] === cb[k]) k++;
     const lca = k === 0 ? "" : ca[k - 1];
-    if (k < ca.length && k < cb.length) addW(lca, ca[k], cb[k], net.w);
+    if (k < ca.length && k < cb.length) addW(lca, ca[k], cb[k], net.w, lca === "" ? net.roomOutside : net.room);
     for (const [chain, other] of [[ca, cb], [cb, ca]]) {
       for (let i = k; i < chain.length - 1; i++) {
         const P = chain[i];
         if (!anchorRecs.has(P)) anchorRecs.set(P, []);
         anchorRecs.get(P).push({ item: chain[i + 1], partner: k < other.length ? other : null, w: net.w });
-        regionWeight.set(P, (regionWeight.get(P) || 0) + net.w);
+        regionWeight.set(P, (regionWeight.get(P) || 0) + net.room);
       }
     }
   }
@@ -669,6 +682,9 @@ export function computeLayout(model, refInfo, measure, opts = {}) {
     const world = C === root ? { x: 0, y: 0, scale: 1 } : { x: C.x, y: C.y, scale: C.scale };
     C.level = new Level(C.frame, C.grid, rects, blocked, world, C === root ? undefined : C.titleW);
     C.level.id = C === root ? null : C.id;
+    C.level.laneSep = C === root ? LANE_SEP_OUTSIDE : LANE_SEP;
+    // a top-level region's border is crossed at the top level too (world units there)
+    if (C !== root && C.depth === 0) C.level.outside = { sep: root.level.sep, laneSep: LANE_SEP_OUTSIDE };
     C.level.depth = C.depth;
   };
   mkLevel(root, roots, rootBoxes, 1);

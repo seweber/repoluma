@@ -9,8 +9,18 @@ from typing import Any
 
 from . import DEFAULT_MAP_PATH, __version__
 from .model import Diagnostic, LoadResult, iter_refs, load_map, ref_key
-from .ownership import compute_ownership, rest_of_files
-from .sources import DISPLAYABLE, Repository, coverage, git_state, list_files
+from .ownership import compute_ownership, mapping_units, rest_of_files
+from .sources import (
+    DISPLAYABLE,
+    Normalized,
+    Repository,
+    Resolution,
+    _find_all,
+    coverage,
+    file_at_revision,
+    git_state,
+    list_files,
+)
 
 REF_SEVERITY = {
     "missing_file": "error",
@@ -68,6 +78,7 @@ class Workspace:
             if with_git:
                 git = git_state(self.root, model["scope"]["reviewed_revision"])
             changed = set(git.get("reviewed", {}).get("changed", []))
+            reviewed_text = _ReviewedText(self.root, git.get("reviewed"), changed)
             for owner_kind, owner_id, ref in iter_refs(model):
                 key = ref_key(ref)
                 ref["key"] = key
@@ -77,6 +88,8 @@ class Workspace:
                         res.changed_since_review = ref["path"] in changed
                     refs[key] = res.to_dict()
                 status = refs[key]["status"]
+                if ref.get("focus"):
+                    _anchor(ref, repo, refs[key], reviewed_text, owner_kind, owner_id, diags)
                 sev = REF_SEVERITY.get(status)
                 if sev:
                     diags.append(
@@ -103,7 +116,11 @@ class Workspace:
             files, truncated = list_files(self.root, repo)
             ownership, own_diags = compute_ownership(model, files, repo, truncated)
             ownership["rest"], rest_diags = rest_of_files(model, ownership, refs, repo)
-            diags.extend(own_diags + rest_diags)
+            ownership["units"], unit_diags = mapping_units(
+                model, ownership, refs, repo,
+                reviewed_text.lines if reviewed_text.rev else None,
+            )
+            diags.extend(own_diags + rest_diags + unit_diags)
             if with_coverage:
                 cov = {
                     "by_dir": coverage(ownership["files"]),
@@ -129,6 +146,62 @@ class Workspace:
         for p in ref_paths:
             tokens[p] = repo.stat_token(p)
         return tokens
+
+
+class _ReviewedText:
+    """The text of cited files at ``scope.reviewed_revision``, read from git on demand (only
+    for files changed since then)."""
+
+    def __init__(self, root: Path, reviewed: dict[str, Any] | None, changed: set[str]):
+        self.root = root
+        self.rev = reviewed["revision"] if reviewed and reviewed.get("known") else None
+        self.changed = changed
+        self.cache: dict[str, list[str] | None] = {}
+
+    def lines(self, path: str) -> list[str] | None:
+        if self.rev is None or path not in self.changed:
+            return None  # no baseline, or unchanged since review (nothing can be new)
+        if path not in self.cache:
+            text = file_at_revision(self.root, self.rev, path) if self.rev else None
+            self.cache[path] = text.splitlines() if text is not None else None
+        return self.cache[path]
+
+
+def _anchor(ref, repo, res, reviewed_text, owner_kind, owner_id, diags) -> None:
+    """Resolve a ref's focus anchors (``ref["anchors"]``), with freshness and diagnostics."""
+    resolution = Resolution(**{k: v for k, v in res.items() if k in Resolution.__annotations__})
+    anchors = repo.resolve_focus(ref, resolution)
+    for a in anchors:
+        if reviewed_text.rev is None:
+            a["since_review"] = "unknown"
+        elif ref["path"] not in reviewed_text.changed:
+            a["since_review"] = "unchanged"
+        else:
+            old = reviewed_text.lines(ref["path"])
+            # the file changed; did this text exist then? (its surroundings may still differ)
+            hits = len(_find_all(Normalized(old).text, a["text"])) if old else 0
+            a["since_review"] = "text_unchanged" if hits else "text_new"
+        if a["status"] != "found":
+            diags.append(Diagnostic(
+                "error",
+                f"focus-{a['status']}",
+                f"{owner_kind} ref {ref['key']}: focus {_short(a['text'])!r} {a['message']}",
+                ref["location"] + ".focus",
+                ref.get("line"),
+                owner_id,
+                hint={
+                    "missing": "copy the text exactly from the code inside the ref's symbol or "
+                    "lines; if the code changed, re-read it and update the claim, not just "
+                    "the text",
+                    "ambiguous": "include more of the statement so the text occurs once, or "
+                    "narrow the ref with a smaller symbol",
+                }.get(a["status"], "fix the ref itself first"),
+            ))
+    ref["anchors"] = anchors
+
+
+def _short(text: str, n: int = 60) -> str:
+    return text if len(text) <= n else text[: n - 1] + "…"
 
 
 def _stat(path: Path) -> str:

@@ -40,12 +40,16 @@ NODE_KINDS = {
 # depends on the type. Data is preferred: if something moves, model the movement.
 RELATIONSHIP_TYPES = {
     "data": "data moves from `from` to `to`; the label names the data",
+    "error": "information about a failure or problem (an exception, an error value, a "
+    "reported diagnostic) moves from where it is raised or found (`from`) to where it is "
+    "handled or read (`to`); the label names it",
     "control": "`from` starts, calls or drives `to` (when no data movement says it)",
     "dependency": "`from` relies on, implements, is constrained or verified by `to`",
 }
 # Optional detail per type (for filtering and the inspector).
 RELATIONSHIP_KINDS = {
     "data": ("event",),
+    "error": (),
     "control": ("calls", "requests", "triggers", "delegates", "renders", "schedules"),
     "dependency": (
         "relies_on",
@@ -85,18 +89,38 @@ V1_KINDS = {
     "documents": ("dependency", "documents", False),
 }
 
-EVIDENCE_STATES = {
-    "observed": "Directly supported by the referenced source.",
+# How sure the author is of a claim (`certainty`; `evidence` in schema_version 1 and 2).
+# This is about the claim, not about whether its references resolve or are fresh.
+CERTAINTY_STATES = {
+    "observed": "The author read the code and it does this (not executed or verified).",
     "inferred": "Interpretation drawn from source, tests, or docs.",
     "needs_review": "Plausible but not checked carefully; treat with caution.",
     "unknown": "Not established; placeholder for a known gap.",
     "planned": "Not implemented yet; describes intended behavior.",
 }
+EVIDENCE_STATES = CERTAINTY_STATES  # name used by schema_version 1 and 2
 
 CONFIDENCE = ("low", "medium", "high")
 STEP_KINDS = ("main", "alternative", "failure", "compensation")
 REF_ROLES = ("implementation", "test", "config", "docs", "schema", "example", "entrypoint")
+# Roles of a relationship's refs: where the data is made, handed over, and taken in.
+PROVENANCE_ROLES = {
+    "origin": "where the data is created, computed, assembled or configured",
+    "transfer": "where it is handed over: the call's arguments, a return, a publish, a write",
+    "receive": "where the other end takes it in: a parameter, the assignment of a result, a read",
+}
+SITE_ROLES = ("transfer", "receive")  # either one grounds an observed data or error line
+CARRIES = ("data", "error")  # relationship types that move something, named by their label
+# The legs of an exchange (relationships sharing an `exchange` id), seen from the caller.
+EXCHANGE_LEGS = {
+    "input": "what the caller supplies (data or control); from the caller to the callee",
+    "result": "what is returned synchronously; from the callee back to the caller",
+    "response": "what arrives later (callback, resolved promise, reply message); back to the caller",
+    "error": "failure information returned instead of a result (an exception, an error "
+    "value); a relationship of type error",
+}
 CONTRACT_FIELDS = ("inputs", "outputs", "guarantees", "errors", "assumptions")
+FOCUS_MAX = 8  # focus anchors per ref
 
 TOP_FIELDS = {
     "schema_version",
@@ -120,6 +144,7 @@ NODE_FIELDS = {
     "details",
     "contract",
     "tags",
+    "certainty",
     "evidence",
     "confidence",
     "refs",
@@ -134,14 +159,19 @@ REL_FIELDS = {
     "kind",
     "label",
     "summary",
+    "exchange",
+    "leg",
+    "certainty",
     "evidence",
     "confidence",
     "refs",
     "notes",
 }
-FLOW_FIELDS = {"id", "label", "summary", "evidence", "confidence", "steps", "tags", "notes"}
+FLOW_FIELDS = {
+    "id", "label", "summary", "certainty", "evidence", "confidence", "steps", "tags", "notes"
+}
 STEP_FIELDS = {"id", "node", "label", "via", "after", "kind", "refs", "notes"}
-REF_FIELDS = {"path", "symbol", "lines", "role", "note"}
+REF_FIELDS = {"path", "symbol", "lines", "role", "note", "focus"}
 GLOB_CHARS = set("*?[")
 
 
@@ -291,6 +321,7 @@ def parse_ref_shorthand(value: str) -> dict[str, Any]:
 class _Validator:
     def __init__(self) -> None:
         self.diags: list[Diagnostic] = []
+        self.version: Any = CURRENT_SCHEMA_VERSION
 
     def add(self, severity, code, message, location="", obj=None, record=None, hint=None):
         self.diags.append(Diagnostic(severity, code, message, location, _line(obj), record, hint))
@@ -399,7 +430,7 @@ class _Validator:
             return None
         return raw
 
-    def refs(self, obj: dict, location: str, record=None) -> list[dict[str, Any]]:
+    def refs(self, obj: dict, location: str, record=None, provenance=False) -> list[dict[str, Any]]:
         value = obj.get("refs")
         if value is None:
             return []
@@ -459,17 +490,24 @@ class _Validator:
             if err:
                 self.add("error", "bad-ref-lines", err, f"{loc}.lines", line_obj, record)
             role = item_d.get("role")
-            if role is not None and role not in REF_ROLES:
-                guess = _suggest(role, REF_ROLES)
+            roles = REF_ROLES + tuple(PROVENANCE_ROLES) if provenance else REF_ROLES
+            if role is not None and role not in roles:
+                guess = _suggest(role, roles)
+                where = "" if provenance or role not in PROVENANCE_ROLES else (
+                    "; origin, transfer and receive describe where data moves and belong "
+                    "on relationship refs"
+                )
                 self.add(
                     "warning",
                     "unknown-role",
-                    f"unknown ref role '{role}'",
+                    f"unknown ref role '{role}'" + where,
                     f"{loc}.role",
                     line_obj,
                     record,
-                    hint=f"did you mean '{guess}'?" if guess else f"known: {', '.join(REF_ROLES)}",
+                    hint=f"did you mean '{guess}'?" if guess and not where
+                    else f"known: {', '.join(roles)}",
                 )
+            focus = self.focus(item_d.get("focus"), f"{loc}.focus", line_obj, record)
             note = item_d.get("note")
             out.append(
                 {
@@ -477,12 +515,51 @@ class _Validator:
                     "symbol": symbol.strip() if isinstance(symbol, str) else None,
                     "lines": list(lines) if lines else None,
                     "role": role if isinstance(role, str) else None,
+                    "focus": focus,
                     "note": str(note) if note is not None else None,
                     "location": loc,
                     "line": _line(line_obj),
                 }
             )
         return out
+
+    def focus(self, value, location, obj, record) -> list[str] | None:
+        """``focus``: exact text (or several) inside the ref's range that the claim is about."""
+        if value is None:
+            return None
+        items = [value] if isinstance(value, str) else value
+        if not isinstance(items, list) or not items:
+            self.add(
+                "error", "bad-focus", "'focus' must be text or a list of text", location, obj,
+                record,
+            )
+            return None
+        out = []
+        for i, item in enumerate(items):
+            text = " ".join(str(item).split()) if isinstance(item, (str, int, float)) else ""
+            if isinstance(item, bool) or not text:
+                self.add(
+                    "error",
+                    "bad-focus",
+                    f"focus[{i}] must be non-empty text copied from the source",
+                    location,
+                    obj,
+                    record,
+                )
+                continue
+            out.append(text)
+        if len(out) > FOCUS_MAX:
+            self.add(
+                "warning",
+                "too-many-focus",
+                f"{len(out)} focus anchors in one ref; only the first {FOCUS_MAX} are used",
+                location,
+                obj,
+                record,
+                hint="split the evidence into several refs, one per site",
+            )
+            out = out[:FOCUS_MAX]
+        return out or None
 
     def owns(self, obj: dict, location: str, record=None) -> list[dict[str, Any]]:
         """``owns``: files (exact paths, globs, ``dir/``) or ``path#Symbol`` parts of a file."""
@@ -528,11 +605,25 @@ class _Validator:
             out.append({"pattern": pattern, "symbol": symbol, "location": loc, "line": _line(obj)})
         return out
 
-    def common(self, obj, location, record) -> dict[str, Any]:
+    def common(self, obj, location, record, provenance=False) -> dict[str, Any]:
         out = {}
-        out["evidence"] = self.enum(obj, "evidence", EVIDENCE_STATES, location, record)
+        key = "certainty"
+        if "evidence" in obj and "certainty" not in obj:
+            key = "evidence"
+            if self.version == CURRENT_SCHEMA_VERSION:
+                self.add(
+                    "warning",
+                    "renamed-field",
+                    "'evidence' is called 'certainty' in schema_version 3 (how sure the claim "
+                    "is; the source evidence is 'refs')",
+                    f"{location}.evidence",
+                    obj,
+                    record,
+                    hint="rename 'evidence:' to 'certainty:'",
+                )
+        out["certainty"] = self.enum(obj, key, CERTAINTY_STATES, location, record)
         out["confidence"] = self.enum(obj, "confidence", CONFIDENCE, location, record)
-        out["refs"] = self.refs(obj, location, record)
+        out["refs"] = self.refs(obj, location, record, provenance)
         out["notes"] = self.text(obj, "notes", location, record)
         return out
 
@@ -577,6 +668,7 @@ def validate_document(doc: Any) -> LoadResult:
         return LoadResult(None, v.diags)
 
     v.check_fields(doc, TOP_FIELDS, "")
+    v.version = doc.get("schema_version")
 
     version = doc.get("schema_version")
     if version is None:
@@ -599,6 +691,17 @@ def validate_document(doc: Any) -> LoadResult:
             doc,
             hint=f"update to schema_version: {CURRENT_SCHEMA_VERSION}; `repoluma guide` explains "
             "relationship types",
+        )
+    elif version == 2:
+        v.add(
+            "info",
+            "old-schema-version",
+            "schema_version 2 is read as before: lines may still end on a container, "
+            "'evidence' means certainty, and observed data relationships need no cited site",
+            "schema_version",
+            doc,
+            hint=f"to migrate to schema_version {CURRENT_SCHEMA_VERSION}, follow 'Migrating from "
+            "schema_version 2' in `repoluma guide`",
         )
     elif version not in SUPPORTED_SCHEMA_VERSIONS:
         newer = isinstance(version, int) and version > max(SUPPORTED_SCHEMA_VERSIONS)
@@ -920,12 +1023,31 @@ def validate_document(doc: Any) -> LoadResult:
             "kind": kind,
             "label": v.text(raw, "label", loc, ident),
             "summary": v.text(raw, "summary", loc, ident),
+            "exchange": None,
+            "leg": None,
             "line": _line(raw),
             "location": loc,
         }
-        rel.update(v.common(raw, loc, ident))
+        exchange = raw.get("exchange")
+        if exchange is not None:
+            if not isinstance(exchange, str) or not ID_RE.match(exchange):
+                v.add(
+                    "error",
+                    "bad-id",
+                    f"exchange id {exchange!r} is invalid",
+                    f"{loc}.exchange",
+                    raw,
+                    ident,
+                    hint="an exchange id is like any id, e.g. 'order-payment-authorization'",
+                )
+            else:
+                rel["exchange"] = exchange
+        leg = v.enum(raw, "leg", EXCHANGE_LEGS, loc, ident, severity="error")
+        rel["leg"] = leg if leg in EXCHANGE_LEGS else None
+        rel.update(v.common(raw, loc, ident, provenance=True))
         relationships.append(rel)
     rel_by_id = {r["id"]: r for r in relationships}
+    exchanges = _check_connections(v, relationships, by_id, ids, version)
 
     # ---- flows
     flows: list[dict[str, Any]] = []
@@ -1070,9 +1192,163 @@ def validate_document(doc: Any) -> LoadResult:
         "source": source,
         "nodes": nodes,
         "relationships": relationships,
+        "exchanges": exchanges,
         "flows": flows,
     }
     return LoadResult(model, v.diags)
+
+
+def _check_connections(v, relationships, by_id, ids, version) -> list[dict[str, Any]]:
+    """Endpoint rules and exchanges. Returns the exchanges: ``{id, caller, callee, legs}``.
+
+    Containers (nodes with children) explain; they do not send, receive or call. In
+    schema_version 3 a relationship ending on a container is an error; older maps keep
+    their meaning and are shown as they were, with a note (``legacy-group-endpoint``).
+    An exchange is the relationships that share an ``exchange`` id: one ``input`` from the
+    caller to the callee and the ``result``, ``response`` or ``error`` that come back.
+    """
+    v3 = version == CURRENT_SCHEMA_VERSION
+    for r in relationships:
+        r["group_endpoint"] = [e for e in (r["from"], r["to"]) if by_id[e]["children"]]
+        if r["group_endpoint"]:
+            names = " and ".join(f"'{e}'" for e in r["group_endpoint"])
+            leaves = sorted(c for e in r["group_endpoint"] for c in by_id[e]["children"])
+            v.add(
+                "error" if v3 else "info",
+                "group-endpoint" if v3 else "legacy-group-endpoint",
+                f"{names} {'contains' if len(r['group_endpoint']) == 1 else 'contain'} other "
+                "nodes: a container explains, it does not send, receive or call"
+                + ("" if v3 else "; shown as written (schema_version 2)"),
+                r["location"],
+                None,
+                r["id"],
+                hint="end the relationship on the item inside that does the work (children: "
+                + ", ".join(leaves[:6]) + ("…" if len(leaves) > 6 else "")
+                + "); do not draw one line per child unless each really takes part",
+            )
+            v.diags[-1].line = r["line"]
+        if v3 and r["type"] in ("data", "error", "control"):
+            rules = [e for e in (r["from"], r["to"]) if by_id[e]["kind"] == "rule"]
+            if rules:
+                v.add(
+                    "warning",
+                    "rule-endpoint",
+                    f"'{rules[0]}' is a rule: a rule constrains, it does not send or receive "
+                    f"{'data' if r['type'] == 'data' else 'calls'}",
+                    r["location"],
+                    None,
+                    r["id"],
+                    hint="use a dependency (kind: enforces) from the operation that enforces it",
+                )
+                v.diags[-1].line = r["line"]
+        if v3 and r["type"] in CARRIES and r["certainty"] == "observed":
+            sites = [x for x in r["refs"] if x["role"] in SITE_ROLES]
+            if not sites:
+                v.add(
+                    "warning",
+                    "observed-without-site",
+                    f"an observed {r['type']} relationship needs a ref to where it is handed "
+                    "over or taken in (role: transfer or receive, with focus)",
+                    r["location"],
+                    None,
+                    r["id"],
+                    hint="cite the call, return, publish or write with `role: transfer` and "
+                    "`focus: <text copied from that line>`; if no such site is in this "
+                    "repository, say so in notes and lower `certainty` to inferred",
+                )
+                v.diags[-1].line = r["line"]
+        if v3:
+            for x in r["refs"]:
+                if x["role"] in PROVENANCE_ROLES and not x["focus"]:
+                    v.add(
+                        "warning",
+                        "site-without-focus",
+                        f"ref {x['path']}{'#' + x['symbol'] if x['symbol'] else ''} is a "
+                        f"{x['role']} site without 'focus': the whole range would be shown as "
+                        "the evidence",
+                        x["location"],
+                        None,
+                        r["id"],
+                        hint="add `focus:` with the exact text of the statement or expression "
+                        "(copied from the source; it must occur once in the ref's range)",
+                    )
+                    v.diags[-1].line = x["line"]
+        if r["leg"] and not r["exchange"]:
+            v.add(
+                "warning",
+                "leg-without-exchange",
+                f"'leg: {r['leg']}' without 'exchange': nothing pairs this relationship",
+                r["location"] + ".leg",
+                None,
+                r["id"],
+                hint="give every leg of one call the same `exchange: <id>`",
+            )
+            v.diags[-1].line = r["line"]
+
+    groups: dict[str, list[dict[str, Any]]] = {}
+    for r in relationships:
+        if r["exchange"]:
+            groups.setdefault(r["exchange"], []).append(r)
+    exchanges = []
+    for xid, legs in groups.items():
+        first = legs[0]
+
+        def fail(message, hint, rel=first, xid=xid):
+            v.add("error", "exchange-incoherent", f"exchange '{xid}': {message}",
+                  rel["location"] + ".exchange", None, rel["id"], hint=hint)
+            v.diags[-1].line = rel["line"]
+
+        if xid in ids:
+            fail(f"'{xid}' is also the id of the record at {ids[xid]}; an exchange needs an id "
+                 "of its own", "exchange ids share the namespace of nodes, relationships and "
+                 "flows: name the exchange after the call, e.g. "
+                 f"'{xid}-call'")
+            continue
+        for r in legs:
+            if not r["leg"]:
+                fail(f"'{r['id']}' does not say which leg it is", "add `leg: input` for what "
+                     "the caller supplies, `leg: result` (or response, error) for what comes "
+                     "back", r)
+        inputs = [r for r in legs if r["leg"] == "input"]
+        back = [r for r in legs if r["leg"] in ("result", "response")]
+        errors = [r for r in legs if r["leg"] == "error"]
+        if len(inputs) > 1:
+            fail(f"{len(inputs)} input legs ({', '.join(r['id'] for r in inputs)})",
+                 "one exchange is one request; give a second call its own exchange id",
+                 inputs[1])
+        ends = {frozenset((r["from"], r["to"])) for r in legs}
+        if len(ends) > 1:
+            fail("its legs connect different nodes", "all legs of an exchange run between "
+                 "the same two nodes, in either direction")
+            continue
+        caller = inputs[0]["from"] if inputs else ((back + errors)[0]["to"] if back + errors
+                                                     else first["from"])
+        callee = first["to"] if first["from"] == caller else first["from"]
+        for r in inputs:
+            if r["type"] not in ("data", "control"):
+                fail(f"input '{r['id']}' is a {r['type']} relationship",
+                     "an input is data the caller supplies (or a control call)", r)
+        for r in back + errors:
+            want = "error" if r["leg"] == "error" else "data"
+            if r["type"] != want:
+                fail(f"'{r['id']}' ({r['leg']}) must be of type {want}",
+                     "a result or response is data coming back; an error leg is `type: error`",
+                     r)
+            elif r["from"] != callee or r["to"] != caller:
+                fail(f"'{r['id']}' ({r['leg']}) runs from '{r['from']}' to '{r['to']}', but "
+                     f"what comes back goes from '{callee}' to '{caller}'",
+                     "swap from and to, or check which leg this is", r)
+        if len(legs) == 1:
+            v.add("info", "single-leg-exchange", f"exchange '{xid}' has only one leg",
+                  first["location"], None, first["id"],
+                  hint="fine for a call whose result does not matter; otherwise add the leg "
+                  "that comes back")
+            v.diags[-1].line = first["line"]
+        order = list(EXCHANGE_LEGS)
+        legs_sorted = sorted(legs, key=lambda r: order.index(r["leg"]) if r["leg"] in order else 9)
+        exchanges.append({"id": xid, "caller": caller, "callee": callee,
+                          "legs": [r["id"] for r in legs_sorted]})
+    return exchanges
 
 
 def _rel_type(v, raw, loc, ident, version):
@@ -1146,6 +1422,7 @@ def _rel_type(v, raw, loc, ident, version):
         )
         return None, None, False, None
     if kind is not None and kind not in RELATIONSHIP_KINDS[typ]:
+        known = ", ".join(RELATIONSHIP_KINDS[typ]) or "none"
         v.add(
             "warning",
             "unknown-kind",
@@ -1153,17 +1430,18 @@ def _rel_type(v, raw, loc, ident, version):
             f"{loc}.kind",
             raw,
             ident,
-            hint=f"known for {typ}: " + ", ".join(RELATIONSHIP_KINDS[typ]) + "; or omit `kind`",
+            hint=f"known for {typ}: {known}; or omit `kind`",
         )
-    if typ == "data" and not v.text(raw, "label", loc, ident):
+    if typ in CARRIES and not v.text(raw, "label", loc, ident):
         v.add(
             "warning",
             "data-without-label",
-            "a data relationship should name the data it carries",
+            f"a {typ} relationship should name the {typ} it carries",
             loc,
             raw,
             ident,
-            hint="set `label` to the data, e.g. `label: order total`",
+            hint="set `label` to what moves, e.g. `label: order total` or "
+            "`label: decline reason`",
         )
     return typ, kind, False, kind or typ
 
@@ -1365,14 +1643,28 @@ def json_schema() -> dict[str, Any]:
                             },
                         ]
                     },
-                    "role": {"enum": list(REF_ROLES)},
+                    "role": {
+                        "enum": list(REF_ROLES) + list(PROVENANCE_ROLES),
+                        "description": "On relationships: "
+                        + "; ".join(f"{k}: {m}" for k, m in PROVENANCE_ROLES.items()),
+                    },
+                    "focus": {
+                        "description": "Exact source text (or several) inside the ref's range "
+                        "that the claim is about; each must occur exactly once there "
+                        "(whitespace is normalized).",
+                        "oneOf": [text, {"type": "array", "items": text, "minItems": 1}],
+                    },
                     "note": text,
                 },
             },
         ]
     }
     common = {
-        "evidence": {"enum": list(EVIDENCE_STATES)},
+        "certainty": {
+            "enum": list(CERTAINTY_STATES),
+            "description": "How sure the claim is: "
+            + "; ".join(f"{k}: {m}" for k, m in CERTAINTY_STATES.items()),
+        },
         "confidence": {"enum": list(CONFIDENCE)},
         "refs": {"type": "array", "items": ref},
         "notes": text,
@@ -1422,6 +1714,15 @@ def json_schema() -> dict[str, Any]:
             "kind": enum_or_text(KIND_TYPE),
             "label": text,
             "summary": text,
+            "exchange": {
+                **ident,
+                "description": "Id shared by the legs of one exchange (a call and what comes "
+                "back); not drawn itself",
+            },
+            "leg": {
+                "enum": list(EXCHANGE_LEGS),
+                "description": "; ".join(f"{k}: {m}" for k, m in EXCHANGE_LEGS.items()),
+            },
             **common,
         },
     }

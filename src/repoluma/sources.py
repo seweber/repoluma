@@ -13,7 +13,9 @@ heuristic. Git is invoked read-only with hooks and fsmonitor disabled.
 from __future__ import annotations
 
 import ast
+import bisect
 import fnmatch
+import functools
 import os
 import re
 import subprocess
@@ -97,6 +99,7 @@ class Repository:
         self.excludes = tuple(DEFAULT_EXCLUDES) + tuple(extra_excludes)
         self._cache: dict[str, tuple[int, int, FileText]] = {}
         self._ast_cache: dict[str, tuple[int, dict[str, list[tuple[int, int]]]]] = {}
+        self._norm_cache: dict[str, tuple[int, Normalized]] = {}
         self._lock = threading.Lock()
 
     # ------------------------------------------------------------- confinement
@@ -251,6 +254,62 @@ class Repository:
             )
         return Resolution(status, message, start, end, total, method)
 
+    def resolve_focus(self, ref: dict[str, Any], res: Resolution) -> list[dict[str, Any]]:
+        """Locate each ``focus`` text of a ref inside the ref's resolved range.
+
+        A focus must occur exactly once in the range (whitespace normalized, so a statement
+        may span lines). No match and several matches are reported as such, never resolved
+        to the first one or to a similar text; when a missing focus occurs elsewhere in the
+        file, the message says where, without moving the evidence there.
+        """
+        focus = ref.get("focus") or []
+        if not focus:
+            return []
+        if res.status not in DISPLAYABLE or not res.start:
+            return [{"text": t, "status": "unresolved", "message": "the ref's range is not "
+                     f"available ({res.status}), so the focus cannot be located"} for t in focus]
+        try:
+            ft = self.read(ref["path"])
+        except SourceError as exc:  # changed or removed since the ref was resolved
+            return [{"text": t, "status": "unresolved", "message": exc.message} for t in focus]
+        norm = self._normalized(ref["path"], ft)
+        anchors = []
+        for text in focus:
+            every = [(norm.pos(a), norm.pos(b - 1)) for a, b in _find_all(norm.text, text)]
+            hits = [(p, q) for p, q in every if p[0] >= res.start and q[0] <= res.end]
+            if len(hits) == 1:
+                (l0, c0), (l1, c1) = hits[0]
+                anchors.append({"text": text, "status": "found", "start": l0, "end": l1,
+                                "cols": [c0, c1 + 1], "message": "found once in the ref's range"})
+            elif hits:
+                lines = sorted({p[0] for p, _ in hits})
+                where = (f"on line {lines[0]}" if len(lines) == 1
+                         else f"on lines {', '.join(map(str, lines[:6]))}")
+                anchors.append({"text": text, "status": "ambiguous", "candidates": lines,
+                                "message": f"occurs {len(hits)} times in the ref's range {where};"
+                                " lengthen the focus text (unquoted YAML text ends at ' #', which "
+                                "can shorten it)"})
+            else:
+                elsewhere = sorted({p[0] for p, _ in every})
+                msg = "not found in the ref's range"
+                if elsewhere:
+                    msg += (f"; the text occurs elsewhere in the file (line "
+                            f"{', '.join(map(str, elsewhere[:6]))}): check the symbol or lines")
+                anchors.append({"text": text, "status": "missing", "message": msg,
+                                "elsewhere": elsewhere[:6] or None})
+        return anchors
+
+    def _normalized(self, rel: str, ft: FileText) -> Normalized:
+        hit = self._norm_cache.get(rel)
+        if hit and hit[0] == ft.mtime_ns:
+            return hit[1]
+        norm = Normalized(ft.lines)
+        with self._lock:
+            if len(self._norm_cache) > 512:
+                self._norm_cache.clear()
+            self._norm_cache[rel] = (ft.mtime_ns, norm)
+        return norm
+
     def _python_index(self, rel: str, ft: FileText) -> dict[str, list[tuple[int, int]]] | None:
         hit = self._ast_cache.get(rel)
         if hit and hit[0] == ft.mtime_ns:
@@ -322,6 +381,40 @@ def _is_overload(node) -> bool:
     return False
 
 
+class Normalized:
+    """A file's text with every run of whitespace (line breaks included) collapsed to one
+    space, and the way back from an offset in it to (line, column) in the file."""
+
+    _TOKEN = re.compile(r"\S+")
+
+    def __init__(self, lines: list[str]):
+        parts: list[str] = []
+        self._offsets: list[int] = []  # offset of each token in the text
+        self._where: list[tuple[int, int]] = []  # (line, column) of each token
+        offset = 0
+        for n, line in enumerate(lines, 1):
+            for m in self._TOKEN.finditer(line):
+                self._offsets.append(offset)
+                self._where.append((n, m.start()))
+                parts.append(m.group())
+                offset += len(m.group()) + 1
+        self.text = " ".join(parts)
+
+    def pos(self, k: int) -> tuple[int, int]:
+        i = bisect.bisect_right(self._offsets, k) - 1
+        line, col = self._where[i]
+        return line, col + (k - self._offsets[i])
+
+
+def _find_all(haystack: str, needle: str) -> list[tuple[int, int]]:
+    """All (possibly overlapping) occurrences as (start, end) offsets."""
+    hits, i = [], haystack.find(needle)
+    while i >= 0:
+        hits.append((i, i + len(needle)))
+        i = haystack.find(needle, i + 1)
+    return hits
+
+
 # ------------------------------------------------------------ text heuristic
 
 _DEF_PREFIX = (
@@ -335,6 +428,7 @@ _DEF_KEYWORDS = (
 )
 
 
+@functools.lru_cache(maxsize=4096)
 def _definition_patterns(name: str) -> list[re.Pattern]:
     n = re.escape(name)
     return [
@@ -486,6 +580,7 @@ def _git(root: Path, *args: str, timeout: float = 5.0) -> str | None:
             cmd,
             capture_output=True,
             text=True,
+            errors="replace",
             timeout=timeout,
             env=env,
             check=False,
@@ -535,6 +630,16 @@ def git_state(root: Path, reviewed_revision: str | None = None) -> dict[str, Any
                 "changed": sorted(set(changed)),
             }
     return state
+
+
+def file_at_revision(root: Path, rev: str, rel: str) -> str | None:
+    """A file's text at a commit (read-only ``git show``), or None if it did not exist."""
+    if check_relative_path(rel):
+        return None
+    out = _git(root, "show", f"{rev}:./{rel}", timeout=10.0)
+    if out is None or "\x00" in out[:8192]:
+        return None
+    return out
 
 
 def list_files(root: Path, repo: Repository, limit: int = 50_000) -> tuple[list[str], bool]:

@@ -7,6 +7,7 @@ import {
   restRows, worldRect,
 } from "./layout.js";
 import { UNMAPPED_ID, splitPath } from "./files.js";
+import { LANE_SEP } from "./route.js";
 import { clamp, rectsIntersect } from "./util.js";
 
 export const TITLE_MIN_PX = 7; // below this a node shows an overview label instead
@@ -23,12 +24,16 @@ const KIND_GLYPH = {
 };
 const UNCERTAIN = new Set(["needs_review", "unknown", "planned"]);
 // relationship types: data lines are the most prominent, dependencies background
-const TYPE_ORDER = ["data", "control", "dependency"];
+const TYPE_ORDER = ["data", "error", "control", "dependency"];
 const TYPE_STYLE = {
   data: { width: 1.25, alpha: 0.85 },
+  error: { width: 1.15, alpha: 0.85, dash: [6, 4] },
   control: { width: 0.9, alpha: 0.7 },
   dependency: { width: 0.7, alpha: 0.55 },
 };
+const LANE_MAX = 3; // px between a pair's route and each lane, at most (closer when zoomed out)
+const LANE_MAX_OUTSIDE = 6; // the same between the top-level regions, where lanes are wider
+const LANE_GAP = 6; // px a lane keeps clear of a neighbouring line (less when zoomed out: sep)
 const GAP_MAX_LINES = 400; // regions drawing more lines than this get no crossing gaps
 const GAP_MAX_CROSSINGS = 3000; // at most this many gaps per region and frame
 const DASH = { needs_review: [8, 5], unknown: [2, 4], planned: [12, 6] };
@@ -41,7 +46,8 @@ export function readTheme() {
     bg: v("--map-bg"), ink: v("--ink"), ink2: v("--ink-2"), ink3: v("--ink-3"),
     line: v("--line"), sel: v("--sel"), hover: v("--hover"), warn: v("--warn"),
     flow: v("--flow"), flowFail: v("--flow-fail"), codeBg: v("--code-bg"), ghost: v("--ghost"),
-    rel: { data: v("--rel-data"), control: v("--rel-control"), dependency: v("--rel-dependency") },
+    rel: { data: v("--rel-data"), error: v("--rel-error"), control: v("--rel-control"),
+      dependency: v("--rel-dependency") },
   };
 }
 
@@ -118,6 +124,7 @@ export class Renderer {
     ctx.fillRect(0, 0, cam.vw, cam.vh);
     this.stats = { nodes: 0, panes: 0, edges: 0, text: 0 };
     this.hitSegs = [];
+    this.labelHits = []; // placed annotations: click targets for their line
     this.noteRects = []; // annotations placed this frame (they must not overlap)
     this.notes = []; // annotations wanted this frame, placed by drawNotes
     this.noted = []; // the lines annotated this frame (their relationship ids)
@@ -132,6 +139,9 @@ export class Renderer {
     const sel = app.selection;
     this.focusDesc = sel?.type === "node" ? app.descendants(sel.id) : null;
     this.relFocus = sel?.type === "relationship" ? sel.id : null;
+    // the other legs of the selected relationship's exchange are highlighted, more quietly
+    this.pairFocus = this.relFocus ? new Set(app.exchangeLegs(this.relFocus).filter((id) => id !== this.relFocus)) : null;
+    this.hoverRel = app.hoverRel || null;
     this.busy = app.layout.routes.length > 120 && cam.z * CARD_W < 400;
     this.drawSegments(null, view);
     for (const id of app.layout.roots) this.drawNode(app.layout.boxes.get(id), view, false);
@@ -183,7 +193,7 @@ export class Renderer {
     }
     ctx.fillStyle = this.fillFor(box);
     ctx.fill();
-    const ev = box.node.evidence;
+    const ev = box.node.certainty;
     ctx.lineWidth = clamp(1.6 * px, 0.6, 2);
     ctx.strokeStyle = this.strokeFor(box);
     const dash = box.id === UNMAPPED_ID ? [6, 4] : DASH[ev];
@@ -462,6 +472,9 @@ export class Renderer {
       }
       seg.bbox = { x: x0, y: y0, w: x1 - x0, h: y1 - y0 };
     }
+    for (const list of this.segsByContainer.values()) {
+      for (const seg of list) if (seg.pair) [seg.near, seg.clear] = nearestAlongside(seg, list);
+    }
     return this.segsByContainer;
   }
 
@@ -495,38 +508,44 @@ export class Renderer {
     const drawn = [];
     for (const seg of segs) {
       if (!rectsIntersect(seg.bbox, view)) continue;
-      const members = this.visibleMembers(seg);
-      if (!members.length) continue;
-      const fd = this.focusDesc;
-      const incident = fd && members.some((m) => fd.has(m.from) || fd.has(m.to));
-      const isRel = this.relFocus && members.some((m) => m.id === this.relFocus);
-      // a line shared by several types is drawn as the most important one: data first
-      const type = TYPE_ORDER.find((t) => members.some((m) => m.rel.type === t)) || "control";
-      const style = TYPE_STYLE[type];
-      let alpha = style.alpha;
-      if (fd || this.relFocus) alpha = incident || isRel ? 1 : 0.13;
-      if (app.flow) alpha = Math.min(alpha, 0.15);
-      const color = this.theme.rel[type];
-      const pts = seg.points.map(([x, y]) => cam.toScreen(x, y));
-      const width = (incident || isRel ? 1.4 : 1) * style.width * (1.3 + Math.min(3, Math.log2(members.length)));
-      const dash = members.every((m) => UNCERTAIN.has(m.rel.evidence)) ? [3, 3] : null;
-      const arrow = seg.dstItem && (seg.terminal || !nextVisible || !app.layout.boxes.get(seg.dstItem)?.grid);
-      const d = { seg, members, pts, color, width, alpha, dash, incident, isRel };
-      drawn.push(d);
-      ctx.save();
-      ctx.globalAlpha = alpha;
-      ctx.strokeStyle = color;
-      ctx.fillStyle = color;
-      ctx.lineWidth = width;
-      if (dash) ctx.setLineDash(dash);
-      polyline(ctx, pts, 5);
-      ctx.stroke();
-      ctx.setLineDash([]);
-      if (arrow) arrowTip(ctx, pts, 6 + width);
-      ctx.restore();
-      this.stats.edges++;
-      this.hitSegs.push({ pts, members });
-      for (const m of members) this.shownRels.add(m.id);
+      const visible = this.visibleMembers(seg);
+      if (!visible.length) continue;
+      const screen = seg.points.map(([x, y]) => cam.toScreen(x, y));
+      for (const lane of this.lanes(seg, visible, screen, nextVisible)) {
+        const { members, pts, arrow } = lane;
+        const fd = this.focusDesc;
+        const incident = fd && members.some((m) => fd.has(m.from) || fd.has(m.to));
+        const isRel = this.relFocus && members.some((m) => m.id === this.relFocus);
+        const isPair = !isRel && this.pairFocus && members.some((m) => this.pairFocus.has(m.id));
+        const isHover = this.hoverRel && members.some((m) => m.id === this.hoverRel);
+        // a line shared by several types is drawn as the most important one: data first
+        const type = TYPE_ORDER.find((t) => members.some((m) => m.rel.type === t)) || "control";
+        const style = TYPE_STYLE[type];
+        let alpha = style.alpha;
+        if (fd || this.relFocus) alpha = incident || isRel ? 1 : isPair ? 0.7 : 0.13;
+        if (app.flow) alpha = Math.min(alpha, 0.15);
+        if (isHover) alpha = Math.max(alpha, 0.95);
+        const color = this.theme.rel[type];
+        const width = (isRel ? 1.8 : incident || isHover ? 1.4 : isPair ? 1.2 : 1) * style.width * (1.3 + Math.min(3, Math.log2(members.length)));
+        // error lines are dashed; unconfirmed lines are dotted only while uncertainty is highlighted
+        const dash = style.dash || (app.uncertainty && members.every((m) => UNCERTAIN.has(m.rel.certainty)) ? [3, 3] : null);
+        const d = { seg, members, line: lane.line, pts, color, width, alpha, dash, incident, isRel, isPair, isHover };
+        drawn.push(d);
+        ctx.save();
+        ctx.globalAlpha = alpha;
+        ctx.strokeStyle = color;
+        ctx.fillStyle = color;
+        ctx.lineWidth = width;
+        if (dash) ctx.setLineDash(dash);
+        polyline(ctx, pts, 5);
+        ctx.stroke();
+        ctx.setLineDash([]);
+        if (arrow) arrowTip(ctx, pts, 6 + width);
+        ctx.restore();
+        this.stats.edges++;
+        this.hitSegs.push({ pts, members, route: seg.members, piece: seg, center: screen, sep: seg.sep * cam.z });
+        for (const m of members) this.shownRels.add(m.id);
+      }
     }
     // crossings: a short gap in the horizontal line makes a crossing read as a crossing,
     // not as a junction where lines meet
@@ -554,14 +573,18 @@ export class Renderer {
     // borders is drawn in pieces, one per region, but is annotated once
     const notes = [];
     for (const d of drawn) {
-      const { members, incident, isRel } = d;
+      const { members, incident, isRel, isPair, isHover } = d;
+      const focused = incident || isRel || isPair || isHover;
       const one = members.length === 1 ? members[0].rel : null;
-      if (members.length > 1 && (!this.busy || incident || isRel)) {
-        notes.push({ d, rank: incident || isRel ? 0 : 1, badge: "×" + members.length });
-      } else if (one && (incident || isRel || (one.type === "data" && one.label && !this.busy && !app.flow))) {
+      const named = members.length <= 3 && members.every((m) => (m.rel.type === "data" || m.rel.type === "error") && m.rel.label);
+      if (members.length > 1 && named && (focused || (!this.busy && !app.flow))) {
+        // a few data lines sharing a route (a result and an error, say) name each payload
+        notes.push({ d, rank: isRel ? -1 : focused ? 0 : 2, text: members.map((m) => noteText(m.rel)).join("  /  ") });
+      } else if (members.length > 1 && (!this.busy || focused)) {
+        notes.push({ d, rank: focused ? 0 : 1, badge: "×" + members.length });
+      } else if (one && (focused || ((one.type === "data" || one.type === "error") && one.label && !this.busy && !app.flow))) {
         // data lines name what they carry; other lines say what they are when focused
-        const text = one.type === "data" || !one.label ? relText(one) : `${relText(one)}: ${one.label}`;
-        notes.push({ d, rank: incident || isRel ? 0 : 2, text });
+        notes.push({ d, rank: isRel ? -1 : focused ? 0 : 2, text: noteText(one) });
       }
     }
     if (!notes.length) return;
@@ -577,6 +600,45 @@ export class Renderer {
   }
 
   /**
+   * What a routed piece is drawn as: one line, or for an exchange's input and answer two
+   * lanes of the same route, each drawn in its own direction (its points end where its arrow
+   * is) and offset to its left, so the two never cross each other. `line` identifies the
+   * lane across the pieces of its route (for one annotation per lane).
+   */
+  lanes(seg, visible, pts, nextVisible) {
+    const boxes = this.app.layout.boxes;
+    const atDst = seg.dstItem && (seg.terminal || !nextVisible || !boxes.get(seg.dstItem)?.grid);
+    if (!seg.pair) return [{ members: visible, pts, arrow: atDst, line: seg.members }];
+    if (!this.laneKeys) this.laneKeys = new WeakMap();
+    let keys = this.laneKeys.get(seg.members);
+    if (!keys) {
+      keys = [{}, {}];
+      this.laneKeys.set(seg.members, keys);
+    }
+    const atSrc = seg.srcItem && (seg.terminalSrc || !nextVisible || !boxes.get(seg.srcItem)?.grid);
+    // lanes lie LANE_SEP·sep from the route (the room the router keeps), at most LANE_MAX
+    // px; where another line runs closer, only as far as leaves a clear gap of
+    // min(sep, LANE_GAP) px to it. Each piece uses what it has, so a pair can be two lanes in
+    // one region and one line in a crowded one (zoomed out).
+    // Between the top-level regions every pair has the same, wider lanes at a given zoom:
+    // the router keeps their room there. Only a pair it could not give that room (a border
+    // too crowded) narrows like the pairs inside regions do.
+    const z = this.app.camera.z, sepPx = seg.sep * z, laneSep = seg.laneSep ?? LANE_SEP;
+    const room = (seg.near * z - Math.min(sepPx, LANE_GAP)) / 2;
+    const roomy = seg.clear - laneSep * seg.sep >= seg.sep - 1e-6; // the router kept its room
+    const lane = seg.outside && roomy ? Math.min(LANE_MAX_OUTSIDE, laneSep * sepPx) :
+      Math.max(0, Math.min(seg.outside ? LANE_MAX_OUTSIDE : LANE_MAX, laneSep * sepPx, room));
+    const ask = visible.filter((m) => m.rel.leg === "input");
+    const back = visible.filter((m) => m.rel.leg !== "input");
+    const out = [];
+    if (ask.length) out.push({ members: ask, pts: offsetPolyline(pts, lane), arrow: atDst, line: keys[0] });
+    if (back.length) {
+      out.push({ members: back, pts: offsetPolyline([...pts].reverse(), lane), arrow: atSrc, line: keys[1] });
+    }
+    return out;
+  }
+
+  /**
    * One annotation per line (its pieces share their members): focused lines first, then
    * bundle counts, then data labels; each on the piece with the longest straight run where
    * it fits, away from crossings, boxes and annotations already placed. A line with no free
@@ -586,7 +648,7 @@ export class Renderer {
     const { ctx } = this;
     const lines = new Map();
     for (const n of this.notes) {
-      const key = n.d.seg.members;
+      const key = n.d.line;
       if (!lines.has(key)) lines.set(key, { rank: n.rank, pieces: [] });
       const line = lines.get(key);
       line.rank = Math.min(line.rank, n.rank);
@@ -598,16 +660,20 @@ export class Renderer {
       for (const n of pieces) {
         const { d } = n;
         ctx.font = n.badge ? `700 11px ${SANS}` : `11px ${SANS}`;
-        const text = n.text && fitText(ctx, n.text, 220);
+        const text = n.text && fitText(ctx, n.text, 260);
         const size = n.badge ? [ctx.measureText(n.badge).width + 10, 18] : [ctx.measureText(text).width + 8, 16];
         const spot = annotationSpot(d.pts, n.crossings, size, this.noteRects, n.blocked);
         if (!spot) continue;
         ctx.save();
         ctx.globalAlpha = d.alpha;
+        const emphasis = d.isRel ? this.theme.sel : d.isHover || d.isPair ? d.color : null;
         if (n.badge) badge(ctx, spot[0], spot[1], n.badge, d.color, this.theme.bg);
-        else label(ctx, spot[0], spot[1], text, this.theme);
+        else label(ctx, spot[0], spot[1], text, this.theme, emphasis);
         ctx.restore();
         this.noted.push(d.members.map((m) => m.id).join(","));
+        // the annotation is a click target for its line (slightly larger than drawn)
+        this.labelHits.push({ x0: spot[0] - size[0] / 2 - 3, y0: spot[1] - size[1] / 2 - 3,
+          x1: spot[0] + size[0] / 2 + 3, y1: spot[1] + size[1] / 2 + 3, members: d.members, pts: d.pts });
         break;
       }
     }
@@ -641,24 +707,26 @@ export class Renderer {
       if (!this.levelVisible(depth)) continue;
       if (seg.container != null && !this.drawnContainers.has(seg.container)) continue;
       if (!rectsIntersect(seg.bbox, view)) continue;
-      const pts = seg.points.map(([x, y]) => cam.toScreen(x, y));
+      const screen = seg.points.map(([x, y]) => cam.toScreen(x, y));
       const nextVisible = this.levelVisible(depth + 1);
-      const used = nets.flatMap((m) => byRel.get(m.id));
-      const failure = used.every((i) => steps[i].kind === "failure" || steps[i].kind === "compensation");
-      const current = used.includes(app.flowStep);
-      ctx.save();
-      ctx.strokeStyle = failure ? t.flowFail : t.flow;
-      ctx.fillStyle = ctx.strokeStyle;
-      ctx.lineWidth = current ? 4 : 2.5;
-      ctx.globalAlpha = current ? 1 : 0.85;
-      if (failure) ctx.setLineDash([7, 5]);
-      polyline(ctx, pts, 5);
-      ctx.stroke();
-      ctx.setLineDash([]);
-      // the relationship's own direction, as for any relationship line
-      const arrow = seg.dstItem && (seg.terminal || !nextVisible || !app.layout.boxes.get(seg.dstItem)?.grid);
-      if (arrow) arrowTip(ctx, pts, current ? 11 : 9);
-      ctx.restore();
+      // on a pair, only the lane of the leg the step uses
+      for (const lane of this.lanes(seg, nets, screen, nextVisible)) {
+        const used = lane.members.flatMap((m) => byRel.get(m.id));
+        const failure = used.every((i) => steps[i].kind === "failure" || steps[i].kind === "compensation");
+        const current = used.includes(app.flowStep);
+        ctx.save();
+        ctx.strokeStyle = failure ? t.flowFail : t.flow;
+        ctx.fillStyle = ctx.strokeStyle;
+        ctx.lineWidth = current ? 4 : 2.5;
+        ctx.globalAlpha = current ? 1 : 0.85;
+        if (failure) ctx.setLineDash([7, 5]);
+        polyline(ctx, lane.pts, 5);
+        ctx.stroke();
+        ctx.setLineDash([]);
+        // the relationship's own direction, as for any relationship line
+        if (lane.arrow) arrowTip(ctx, lane.pts, current ? 11 : 9);
+        ctx.restore();
+      }
     }
     // numbered badges, stacked per representative box
     const perRep = new Map();
@@ -685,8 +753,15 @@ export class Renderer {
     }
   }
 
-  /** Relationship(s) under the pointer, from the segments drawn in the last frame. */
+  /**
+   * Relationship(s) under the pointer, from the last frame: an annotation (label or bundle
+   * badge) first, since it names one line exactly, then the nearest line within 6 px.
+   */
   hitRoute(sx, sy) {
+    for (let i = (this.labelHits || []).length - 1; i >= 0; i--) {
+      const h = this.labelHits[i];
+      if (sx >= h.x0 && sx <= h.x1 && sy >= h.y0 && sy <= h.y1) return { ...h, label: true };
+    }
     let best = null, bestD = 6;
     for (const h of this.hitSegs || []) {
       for (let i = 1; i < h.pts.length; i++) {
@@ -829,6 +904,67 @@ function arrowTip(ctx, pts, size) {
   ctx.fill();
 }
 
+/**
+ * The closest distance (world units) at which another line's piece runs alongside this
+ * pair's piece, and the same less that line's own lane width if it is a pair (Infinity if
+ * none): how much room its lanes have.
+ */
+function nearestAlongside(seg, others) {
+  let near = Infinity, clear = Infinity;
+  const runs = (s) => {
+    const out = [];
+    for (let i = 1; i < s.points.length; i++) out.push([s.points[i - 1], s.points[i]]);
+    return out;
+  };
+  const mine = runs(seg);
+  const pad = seg.sep * 2;
+  const zone = { x: seg.bbox.x - pad, y: seg.bbox.y - pad, w: seg.bbox.w + 2 * pad, h: seg.bbox.h + 2 * pad };
+  for (const o of others) {
+    if (o === seg || o.members === seg.members || !rectsIntersect(o.bbox, zone)) continue;
+    for (const [p, q] of mine) {
+      for (const [r, t] of runs(o)) {
+        for (const ax of [0, 1]) {
+          const c = 1 - ax; // runs parallel to axis ax, at constant coordinate c
+          if (Math.abs(p[c] - q[c]) > 1e-6 || Math.abs(r[c] - t[c]) > 1e-6) continue;
+          const lo = Math.max(Math.min(p[ax], q[ax]), Math.min(r[ax], t[ax]));
+          const hi = Math.min(Math.max(p[ax], q[ax]), Math.max(r[ax], t[ax]));
+          if (hi - lo <= 1e-6) continue;
+          const d = Math.abs(p[c] - r[c]);
+          near = Math.min(near, d);
+          clear = Math.min(clear, d - (o.pair ? (o.laneSep ?? 0) * o.sep : 0));
+        }
+      }
+    }
+  }
+  return [near, clear];
+}
+
+/**
+ * An orthogonal polyline moved `d` px to the left of its direction (screen coordinates,
+ * y down): ends move along their piece's normal, corners by both normals (a mitre).
+ */
+function offsetPolyline(pts, d) {
+  if (pts.length < 2) return pts;
+  const normals = [];
+  for (let i = 1; i < pts.length; i++) {
+    const dx = pts[i][0] - pts[i - 1][0], dy = pts[i][1] - pts[i - 1][1];
+    const len = Math.hypot(dx, dy) || 1;
+    normals.push([dy / len, -dx / len]);
+  }
+  return pts.map((p, i) => {
+    const a = normals[Math.max(0, i - 1)], b = normals[Math.min(normals.length - 1, i)];
+    const same = Math.abs(a[0] - b[0]) < 1e-6 && Math.abs(a[1] - b[1]) < 1e-6;
+    const [nx, ny] = same ? a : [a[0] + b[0], a[1] + b[1]];
+    return [p[0] + nx * d, p[1] + ny * d];
+  });
+}
+
+/** A line's annotation: the data it carries (an error leg marked ✕), else what it is. */
+function noteText(r) {
+  if (r.type === "data" || r.type === "error") return relText(r);
+  return r.label ? `${relText(r)}: ${r.label}` : relText(r);
+}
+
 /** Proper crossings between horizontal and vertical pieces of different drawn lines. */
 function screenCrossings(drawn, limit = GAP_MAX_CROSSINGS) {
   const H = [], V = [];
@@ -913,13 +1049,19 @@ function badge(ctx, x, y, text, color, bg) {
   ctx.textAlign = "left";
 }
 
-function label(ctx, x, y, text, theme) {
+function label(ctx, x, y, text, theme, emphasis) {
   ctx.font = `11px ${SANS}`;
   const w = ctx.measureText(text).width + 8;
   ctx.globalAlpha = Math.min(1, ctx.globalAlpha + 0.2);
   ctx.fillStyle = theme.bg;
   ctx.fillRect(x - w / 2, y - 8, w, 16);
-  ctx.fillStyle = theme.ink2;
+  if (emphasis) {
+    // a selected or hovered line's label is framed: it is what a click picks
+    ctx.strokeStyle = emphasis;
+    ctx.lineWidth = 1.2;
+    ctx.strokeRect(x - w / 2 + 0.5, y - 7.5, w - 1, 15);
+  }
+  ctx.fillStyle = emphasis ? theme.ink : theme.ink2;
   ctx.textBaseline = "middle";
   ctx.textAlign = "center";
   ctx.fillText(text, x, y);

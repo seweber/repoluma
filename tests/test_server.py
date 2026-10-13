@@ -127,3 +127,44 @@ def test_bootstrap_without_map(tmp_path):
     data = ws.analyze()
     assert data["model"] is None and data["map_exists"] is False
     assert data["diagnostics"][0]["code"] == "missing-map"
+
+
+def test_failing_browser_helper_prints_one_line(monkeypatch, capsys, tmp_path):
+    from repoluma.server import open_browser_quietly
+
+    helper = tmp_path / "browser.sh"
+    helper.write_text("#!/bin/sh\necho 'Error: connect ECONNREFUSED' >&2\nexit 1\n")
+    helper.chmod(0o755)
+    monkeypatch.setenv("BROWSER", str(helper))
+    open_browser_quietly("http://127.0.0.1:1/")
+    out = capsys.readouterr()
+    assert "ECONNREFUSED" not in out.out + out.err
+    assert "open http://127.0.0.1:1/ yourself" in out.out
+    helper.write_text("#!/bin/sh\nexit 0\n")
+    open_browser_quietly("http://127.0.0.1:1/")
+    assert capsys.readouterr().out == ""
+
+
+def test_keep_alive_serves_whole_responses_on_one_connection(tmp_path):
+    """Large responses arrive complete, several on one connection (HTTP/1.1)."""
+    import http.client
+    import threading
+
+    from repoluma.server import create_server
+    from repoluma.workspace import Workspace
+
+    httpd, _, _ = create_server(Workspace.open(tmp_path))
+    threading.Thread(target=httpd.serve_forever, kwargs={"poll_interval": 0.05}, daemon=True).start()
+    try:
+        port = httpd.server_address[1]
+        conn = http.client.HTTPConnection("127.0.0.1", port, timeout=5)
+        for path in ("/static/app.css", "/static/js/main.js", "/static/js/ui.js"):
+            conn.request("GET", path)
+            resp = conn.getresponse()
+            body = resp.read()
+            assert resp.status == 200 and resp.version == 11
+            assert len(body) == int(resp.getheader("Content-Length")) > 16384
+        conn.close()
+    finally:
+        httpd.shutdown()
+        httpd.server_close()

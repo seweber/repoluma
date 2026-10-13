@@ -38,12 +38,12 @@ def test_validate_reports_and_fails_on_errors(tmp_path, capsys):
     assert main(["validate", "--root", str(tmp_path), "--json"]) == 1
     data = json.loads(capsys.readouterr().out)
     assert data["ok"] is False and data["errors"] == 1
-    assert data["diagnostics"][0]["record"] == "a"
+    assert next(d for d in data["diagnostics"] if d["severity"] == "error")["record"] == "a"
 
 
 def test_validate_example_ok(shop, capsys):
     assert main(["validate", "--root", str(shop)]) == 0
-    assert "36/36 source refs resolve" in capsys.readouterr().out
+    assert "41/41 source refs resolve" in capsys.readouterr().out
 
 
 def test_strict_turns_warnings_into_failure(tmp_path):
@@ -58,7 +58,7 @@ def test_strict_turns_warnings_into_failure(tmp_path):
 
 def test_guide_and_skill_export(tmp_path, capsys):
     assert main(["guide"]) == 0
-    assert "schema_version: 2" in capsys.readouterr().out
+    assert "schema_version: 3" in capsys.readouterr().out
     assert main(["guide", "--format", "skill", "--write", str(tmp_path)]) == 0
     skill = (tmp_path / "SKILL.md").read_text()
     assert skill.startswith("---\nname: repoluma-map")
@@ -75,3 +75,21 @@ def test_example_copies_a_valid_repository(tmp_path, capsys):
     assert main(["example", str(dest)]) == 0
     assert main(["validate", "--root", str(dest)]) == 0
     assert main(["example", str(dest)]) == 1  # refuses non-empty destination
+
+
+def test_init_prompt_is_flush_left_and_copied_only_on_a_terminal(tmp_path, capsys, monkeypatch):
+    from repoluma import cli
+
+    calls = []
+    monkeypatch.setattr(cli, "copy_to_clipboard", lambda text: calls.append(text) or "pbcopy")
+    assert main(["init", "--root", str(tmp_path)]) == 0
+    out = capsys.readouterr().out
+    assert "\nPlease build a repoluma map of this repository.\n1. Run" in out
+    assert calls == []  # captured output is not a terminal: nothing is copied
+
+    monkeypatch.setattr(cli.sys.stdout, "isatty", lambda: True)
+    assert main(["init", "--root", str(tmp_path)]) == 0
+    assert calls and calls[0].startswith("Please build a repoluma map")
+    assert "copied to the clipboard with pbcopy" in capsys.readouterr().out
+    assert main(["init", "--root", str(tmp_path), "--no-copy"]) == 0
+    assert len(calls) == 1

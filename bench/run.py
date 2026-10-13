@@ -1,8 +1,8 @@
 """Measure viewer performance on maps (stress shapes or any repository).
 
-    uv run --with playwright python bench/run.py ROOT [ROOT ...] [--json OUT]
+    uv run python bench/run.py ROOT [ROOT ...] [--json OUT]
 
-Needs a Chromium for Playwright (`uv run --with playwright playwright install chromium`).
+Needs a Chromium for Playwright (`uv run playwright install chromium`).
 For each repository it records: analysis (validation + reference resolution) time,
 page-ready time, layout time, per-frame render work during a scripted zoom/pan
 sequence, frame intervals during animated fly-to, and source-pane open latency.
@@ -69,7 +69,23 @@ async () => {
       if (el) { latencies.push(performance.now() - t0); break; }
     }
   }
+  // 4) inspector with the cited code of a data line (the line with the most cited sites)
+  const evidence = [];
+  const rels = [...app.model.relationships].filter((r) => (r.refs || []).some((x) => (x.anchors || []).length))
+    .sort((a, b) => b.refs.length - a.refs.length).slice(0, 5);
+  for (const r of rels) {
+    app.select(null);
+    await frame();
+    app.sources.invalidate(null);
+    const t0 = performance.now();
+    app.select({ type: "relationship", id: r.id });
+    while (performance.now() - t0 < 5000) {
+      await frame();
+      if (document.querySelector(".ev-card .ev-fc")) { evidence.push(performance.now() - t0); break; }
+    }
+  }
   return { renderWork: summary(work), primitives: summary(drawn), frameInterval: summary(intervals),
+           evidenceOpen: evidence.length ? summary(evidence) : null,
            paneOpen: summary(latencies), layoutMs: app.perf.layoutMs,
            nodes: app.model.nodes.length, relationships: app.model.relationships.length,
            panes: app.layout.panes.size };

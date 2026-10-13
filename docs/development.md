@@ -56,15 +56,18 @@ uv run pytest            # Python: model, sources, server, CLI, freshness, self-
 uv run ruff check .
 ```
 
-End-to-end browser checks and measurements need Playwright and a Chromium:
+End-to-end browser checks and measurements need a Chromium for the locked Playwright
+version (a dev dependency). The dev container has Chromium's shared libraries and fonts in
+the image (an apt list in `.devcontainer/Dockerfile`, independent of the playwright
+version) and installs the browser on first start; elsewhere:
 
 ```sh
-uv run --with playwright playwright install chromium
-uv run --with playwright python bench/run.py src/repoluma/examples/shop .
+uv run playwright install --with-deps chromium   # --with-deps needs root (apt)
+uv run python bench/run.py src/repoluma/examples/shop .
 ```
 
-On minimal Linux containers Chromium may need extra shared libraries and fonts; see
-the notes in `docs/performance.md`.
+Without a browser, `tests/test_e2e_browser.py` is skipped, not failed. If a newer
+Chromium needs another library, the skip message names it; add it to the apt list.
 
 ## Packaging check
 
@@ -76,3 +79,10 @@ uv build
 uvx --from dist/repoluma-*.whl repoluma example /tmp/rl-example
 uvx --from dist/repoluma-*.whl repoluma serve --root /tmp/rl-example
 ```
+
+## Fixtures
+
+`tests/fixtures/provenance` is a tiny repository with a schema_version 3 map for the
+cases the shop does not have: an object configured by setters, a setter with side
+effects, and shared mutable state. The authoring guide's worked examples are copied from
+it and from the shop; `tests/test_guide.py` fails if they drift apart.

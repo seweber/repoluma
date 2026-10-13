@@ -414,9 +414,9 @@ GLUE_RE = re.compile(
 
 
 def glue_lines(path: str, lines: list[str]) -> set[int]:
-    """Lines that need no node: blank lines, comments, imports, the module docstring,
-    ``__all__`` and the ``if __name__ == "__main__"`` block. Everything else is code that
-    some node must show."""
+    """Lines that need no node: blank lines, comments, imports (also inside a module-level
+    ``if TYPE_CHECKING:``), the module docstring, ``__all__`` and the
+    ``if __name__ == "__main__"`` block. Everything else is code that some node must show."""
     glue = {i for i, t in enumerate(lines, 1) if GLUE_RE.match(t)}
     if not path.endswith((".py", ".pyi")):
         # multi-line imports: import {\n  a,\n  b,\n} from "./x.js";
@@ -438,7 +438,9 @@ def glue_lines(path: str, lines: list[str]) -> set[int]:
             and isinstance(node.value.value, str)
         names = [t.id for t in getattr(node, "targets", []) if isinstance(t, ast.Name)]
         main = isinstance(node, ast.If) and "__name__" in ast.unparse(node.test)
-        if doc or main or names == ["__all__"] or isinstance(node, (ast.Import, ast.ImportFrom)):
+        typing_only = isinstance(node, ast.If) and ast.unparse(node.test).endswith("TYPE_CHECKING") \
+            and not node.orelse and all(isinstance(b, (ast.Import, ast.ImportFrom)) for b in node.body)
+        if doc or main or typing_only or names == ["__all__"] or isinstance(node, (ast.Import, ast.ImportFrom)):
             glue.update(range(node.lineno, (node.end_lineno or node.lineno) + 1))
     return glue
 
@@ -487,13 +489,7 @@ def rest_of_files(model: dict[str, Any], ownership: dict[str, Any], refs: dict[s
     on each file entry. Code that needs an owner and has none is listed under ``~unmapped``.
     """
     by_id = {n["id"]: n for n in model["nodes"]}
-    area_of = {nid: _chain(by_id, nid)[0] for nid in by_id}
-    cites: dict[str, list[tuple[str, str, str, int, int]]] = defaultdict(list)
-    for n in model["nodes"]:
-        for r in n["refs"]:
-            res = refs.get(r.get("key") or "", {})
-            if res.get("status") in DISPLAYED and res.get("start"):
-                cites[r["path"]].append((area_of[n["id"]], n["id"], r["key"], res["start"], res["end"]))
+    cites = _cites(model, refs)
     out, diags = [], []
     for path, rec in sorted(ownership["files"].items()):
         if rec["owner"] is None and not rec["parts"] and not rec["required"]:
@@ -558,6 +554,153 @@ def rest_of_files(model: dict[str, Any], ownership: dict[str, Any], refs: dict[s
             if area != UNMAPPED:
                 diags.append(_unexplained(by_id[area], path, open_lines, segments, repo, ft))
     return out, diags
+
+
+def _cites(model: dict[str, Any], refs: dict[str, Any]):
+    """Displayable node refs per file: (area, node, ref key, start, end)."""
+    by_id = {n["id"]: n for n in model["nodes"]}
+    area_of = {nid: _chain(by_id, nid)[0] for nid in by_id}
+    cites: dict[str, list[tuple[str, str, str, int, int]]] = defaultdict(list)
+    for n in model["nodes"]:
+        for r in n["refs"]:
+            res = refs.get(r.get("key") or "", {})
+            if res.get("status") in DISPLAYED and res.get("start"):
+                cites[r["path"]].append((area_of[n["id"]], n["id"], r["key"], res["start"], res["end"]))
+    return cites
+
+
+def python_units(text_lines: list[str]) -> list[tuple[str, int, int]] | None:
+    """The definitions a Python file accounts for: module-level functions, classes and
+    assignments, and the methods of classes, as (qualified name, start, end). None when the
+    file does not parse. Statements inside functions are part of their function."""
+    try:
+        tree = ast.parse("\n".join(text_lines) + "\n")
+    except (SyntaxError, ValueError):
+        return None
+    out = []
+
+    def span(node):
+        return min([node.lineno] + [d.lineno for d in getattr(node, "decorator_list", [])]), \
+            node.end_lineno or node.lineno
+
+    def visit(body, prefix, in_class):
+        for node in body:
+            if isinstance(node, (ast.FunctionDef, ast.AsyncFunctionDef, ast.ClassDef)):
+                out.append((prefix + node.name, *span(node)))
+                if isinstance(node, ast.ClassDef):
+                    visit(node.body, prefix + node.name + ".", True)
+            elif not in_class and isinstance(node, (ast.Assign, ast.AnnAssign)):
+                targets = node.targets if isinstance(node, ast.Assign) else [node.target]
+                for t in targets:
+                    if isinstance(t, ast.Name) and t.id != "__all__":
+                        out.append((t.id, *span(node)))
+            elif not in_class and isinstance(node, (ast.If, ast.Try)) and not (
+                isinstance(node, ast.If) and "__name__" in ast.unparse(node.test)
+            ):
+                visit(node.body, prefix, False)
+                for h in getattr(node, "handlers", []):
+                    visit(h.body, prefix, False)
+                visit(node.orelse, prefix, False)
+
+    visit(tree.body, "", False)
+    return out
+
+
+def mapping_units(model, ownership, refs, repo, reviewed_lines=None):
+    """How each definition of an owned Python file is accounted for by its area's nodes.
+
+    * ``mapped``: a node cites the definition itself (or a region inside it);
+    * ``coarse``: it is only inside a broader ref (its class, the whole file, a wide line
+      range): accounted for, but no node says anything about it in particular;
+    * ``unmapped``: no node of its area shows it (``unexplained-code`` reports these).
+
+    None of these says that a description is right. ``reviewed_lines(path)`` gives the file
+    at ``scope.reviewed_revision`` (or None); definitions added since then that only a coarse
+    ref covers are reported, because a broad ref silently covers new behavior.
+    Returns ``(payload, diagnostics)``.
+    """
+    by_id = {n["id"]: n for n in model["nodes"]}
+    cites = _cites(model, refs)
+    counts = {"mapped": 0, "coarse": 0, "unmapped": 0}
+    coarse: dict[tuple[str, str], dict[str, Any]] = {}
+    files_without_inventory = []
+    diags: list[Diagnostic] = []
+    for path, rec in sorted(ownership["files"].items()):
+        if not is_code(path) or (rec["owner"] is None and not rec["parts"]):
+            continue
+        if not path.endswith((".py", ".pyi")):
+            files_without_inventory.append(path)
+            continue
+        try:
+            ft = repo.read(path)
+        except Exception:  # noqa: BLE001, S112 - unreadable files are reported elsewhere
+            continue
+        units = python_units(ft.lines)
+        if units is None:
+            files_without_inventory.append(path)
+            continue
+        old_names = None
+        if reviewed_lines is not None:
+            old = reviewed_lines(path)
+            if old is not None:
+                old_units = python_units(old)
+                old_names = {u[0] for u in old_units} if old_units is not None else None
+        for name, a, b in units:
+            area = owner_at(rec, a)[0]
+            if area is None:
+                continue
+            mine = [c for c in cites[path] if c[0] == area]
+            if any((c[3] >= a and c[4] <= b) for c in mine):
+                counts["mapped"] += 1
+                continue
+            around = [c for c in mine if c[3] <= a and c[4] >= b]
+            if not around:
+                counts["unmapped"] += 1
+                continue
+            counts["coarse"] += 1
+            c = min(around, key=lambda c: c[4] - c[3])
+            entry = coarse.setdefault((c[1], c[2]), {"node": c[1], "ref": c[2], "path": path,
+                                                     "members": [], "new": []})
+            entry["members"].append(name)
+            if old_names is not None and name not in old_names:
+                entry["new"].append(name)
+    for e in coarse.values():
+        # members of a coarsely cited class are named once, by their class
+        e["members"] = [m for m in e["members"]
+                        if not any(m.startswith(o + ".") for o in e["members"])]
+        node = by_id[e["node"]]
+        shown = ", ".join(e["members"][:6]) + ("…" if len(e["members"]) > 6 else "")
+        diags.append(Diagnostic(
+            "info",
+            "coarse-mapping",
+            f"'{e['node']}' accounts for {len(e['members'])} definitions of {e['path']} only "
+            f"through its ref {e['ref']}: {shown}",
+            node["location"] + ".refs",
+            node["line"],
+            e["node"],
+            hint="fine for a cohesive module or class; if a member does something a reader "
+            "should know, give it its own ref or node",
+        ))
+        if e["new"]:
+            diags.append(Diagnostic(
+                "warning",
+                "coarse-new-members",
+                f"{len(e['new'])} definitions added to {e['path']} since the reviewed revision "
+                f"are covered only by '{e['node']}' through {e['ref']}: "
+                + ", ".join(e["new"][:6]) + ("…" if len(e["new"]) > 6 else ""),
+                node["location"] + ".refs",
+                node["line"],
+                e["node"],
+                hint="read the new code; describe it (own ref or node) or confirm that the "
+                "broad ref still says what it does, then update scope.reviewed_revision",
+            ))
+    payload = {
+        "counts": counts,
+        "coarse": list(coarse.values()),
+        "without_inventory": files_without_inventory,
+        "baseline": reviewed_lines is not None,
+    }
+    return payload, diags
 
 
 def _unexplained(area: dict, path: str, open_lines: list[int], segments, repo, ft) -> Diagnostic:

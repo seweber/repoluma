@@ -1,0 +1,200 @@
+{
+  "environment": {
+    "browser": "chromium 153.0.8010.12 (headless)",
+    "python": "3.14.7",
+    "machine": "x86_64",
+    "system": "Linux-5.15.0-186-generic-x86_64-with-glibc2.39"
+  },
+  "results": [
+    {
+      "renderWork": {
+        "n": 660,
+        "p50": 2.299999237060547,
+        "p95": 6.600000381469727,
+        "max": 28.399999618530273
+      },
+      "primitives": {
+        "n": 660,
+        "p50": 6,
+        "p95": 99,
+        "max": 126
+      },
+      "frameInterval": {
+        "n": 267,
+        "p50": 16.699999809265137,
+        "p95": 19.40000057220459,
+        "max": 25
+      },
+      "evidenceOpen": {
+        "n": 5,
+        "p50": 17,
+        "p95": 20.5,
+        "max": 20.5
+      },
+      "paneOpen": {
+        "n": 5,
+        "p50": 49.89999961853027,
+        "p95": 50,
+        "max": 50
+      },
+      "layoutMs": 76.10000038146973,
+      "nodes": 29,
+      "relationships": 33,
+      "panes": 40,
+      "repo": "shop",
+      "analyzeSeconds": 0.044,
+      "pageReadySeconds": 0.199,
+      "refs": 41,
+      "jsHeapMB": 7.6
+    },
+    {
+      "renderWork": {
+        "n": 660,
+        "p50": 1.8999996185302734,
+        "p95": 6.5,
+        "max": 42.5
+      },
+      "primitives": {
+        "n": 660,
+        "p50": 7,
+        "p95": 207,
+        "max": 207
+      },
+      "frameInterval": {
+        "n": 266,
+        "p50": 16.600000381469727,
+        "p95": 19.800000190734863,
+        "max": 31.899999618530273
+      },
+      "evidenceOpen": {
+        "n": 5,
+        "p50": 11.600000381469727,
+        "p95": 19.199999809265137,
+        "max": 19.199999809265137
+      },
+      "paneOpen": {
+        "n": 5,
+        "p50": 49.89999961853027,
+        "p95": 58.19999980926514,
+        "max": 58.19999980926514
+      },
+      "layoutMs": 109.19999980926514,
+      "nodes": 57,
+      "relationships": 62,
+      "panes": 124,
+      "repo": "repoluma",
+      "analyzeSeconds": 0.511,
+      "pageReadySeconds": 0.773,
+      "refs": 139,
+      "jsHeapMB": 5.9
+    },
+    {
+      "renderWork": {
+        "n": 660,
+        "p50": 2.3999996185302734,
+        "p95": 9.800000190734863,
+        "max": 45.59999942779541
+      },
+      "primitives": {
+        "n": 660,
+        "p50": 168,
+        "p95": 3816,
+        "max": 4816
+      },
+      "frameInterval": {
+        "n": 253,
+        "p50": 16.799999237060547,
+        "p95": 25.600000381469727,
+        "max": 48.59999942779541
+      },
+      "evidenceOpen": null,
+      "paneOpen": {
+        "n": 5,
+        "p50": 49.80000019073486,
+        "p95": 50,
+        "max": 50
+      },
+      "layoutMs": 1665.6999998092651,
+      "nodes": 2041,
+      "relationships": 2000,
+      "panes": 2020,
+      "repo": "broad",
+      "analyzeSeconds": 0.482,
+      "pageReadySeconds": 2.27,
+      "refs": 1000,
+      "jsHeapMB": 31.6
+    },
+    {
+      "renderWork": {
+        "n": 660,
+        "p50": 5.800000190734863,
+        "p95": 29.399999618530273,
+        "max": 148.5999994277954
+      },
+      "primitives": {
+        "n": 660,
+        "p50": 398,
+        "p95": 4255,
+        "max": 5982
+      },
+      "frameInterval": {
+        "n": 241,
+        "p50": 17.199999809265137,
+        "p95": 26.5,
+        "max": 56.39999961853027
+      },
+      "evidenceOpen": null,
+      "paneOpen": {
+        "n": 5,
+        "p50": 50,
+        "p95": 50,
+        "max": 50
+      },
+      "layoutMs": 5569.5,
+      "nodes": 3280,
+      "relationships": 3000,
+      "panes": 2207,
+      "repo": "deep",
+      "analyzeSeconds": 0.732,
+      "pageReadySeconds": 6.472,
+      "refs": 978,
+      "jsHeapMB": 73.4
+    },
+    {
+      "renderWork": {
+        "n": 660,
+        "p50": 6.799999237060547,
+        "p95": 73.90000057220459,
+        "max": 144.80000019073486
+      },
+      "primitives": {
+        "n": 660,
+        "p50": 658,
+        "p95": 5907,
+        "max": 7592
+      },
+      "frameInterval": {
+        "n": 212,
+        "p50": 16.800000190734863,
+        "p95": 47.69999980926514,
+        "max": 89.59999942779541
+      },
+      "evidenceOpen": null,
+      "paneOpen": {
+        "n": 5,
+        "p50": 46.5,
+        "p95": 57.39999961853027,
+        "max": 57.39999961853027
+      },
+      "layoutMs": 4868.300000190735,
+      "nodes": 301,
+      "relationships": 6000,
+      "panes": 295,
+      "repo": "dense",
+      "analyzeSeconds": 0.371,
+      "pageReadySeconds": 5.411,
+      "refs": 285,
+      "jsHeapMB": 18.9
+    }
+  ]
+}

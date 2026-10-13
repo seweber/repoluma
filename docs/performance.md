@@ -99,3 +99,34 @@ counted in the status bar, is the next step.
 
 Real semantic maps are much smaller than these limits: the maps an agent produces for
 a medium-sized repository have tens to a few hundred nodes.
+
+## Schema 3 (2026-10-13)
+
+Same container, Chromium 153 headless, 1440×900; three runs each of the previous commit
+(b5da601, "before") and this one ("after"), medians, range in brackets. The stress maps
+are schema_version 1 and identical in both; the shop and self-map are the migrated maps
+(more relationships after: shop 26 → 33, self-map 49 → 62).
+
+| dataset | analyze before | analyze after | layout before | layout after | render p95 before / after | pane open p95 before / after | evidence open p95 |
+| --- | ---: | ---: | ---: | ---: | --- | --- | ---: |
+| shop | 0.045 s | 0.047 s | 91 ms (86–98) | 93 ms (76–113) | 6.3 / 6.6 ms | 50 / 50 ms | 20 ms |
+| self-map | 0.32 s | 0.53 s¹ | 208 ms (158–209) | 206 ms (109–209) | 6.4 / 6.5 ms | 59 / 58 ms | 19 ms |
+| broad | 0.48 s | 0.47 s | 1.73 s (1.64–1.73) | 1.69 s (1.67–1.72) | 10.1 / 10.1 ms | 50 / 50 ms | – |
+| deep | 0.66 s (0.62–0.69) | 0.73 s² (0.68–0.77) | 5.0 s (4.8–5.2) | 5.4 s (4.8–5.6) | 26.5 / 27.1 ms | 50 / 50 ms | – |
+| dense | 0.41 s | 0.43 s | 4.8 s (4.1–5.1) | 4.6 s (4.5–4.9) | 70.3 / 73.0 ms | 51 / 57 ms | – |
+
+¹ On the *old* self-map the new code takes 0.34 s (+6%, the definition inventory); the
+rest is the new map's 150 references (95 before), mostly JavaScript symbols resolved by
+text pattern. A first version of the focus resolver normalized the whole file for every
+reference and took 0.67 s; it now normalizes each file once.
+² The definition inventory parses every owned Python file (about 2,000 generated files in
+this map): about +10% analysis time on the largest maps.
+
+Raw data: `bench/results/2026-10-13-schema3-before.json` and `…-after.json` (one run of
+each; the table gives medians of three).
+
+"Evidence open" is new: from selecting a line with the most cited sites until its first
+excerpt is in the DOM, with an empty excerpt cache. Apart from deep-map analysis, the
+differences in the stress rows are within the run-to-run range. Layout geometry of unchanged maps is identical before and
+after (`bench/layout_eval.py`: old self-map 8 crossings, shop 8, with either version); the
+changes in the bundled maps' layouts come from their content (see `docs/decisions.md` §13).

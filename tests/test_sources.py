@@ -218,3 +218,36 @@ def test_overload_stubs_do_not_make_a_symbol_ambiguous(tmp_path):
     r = repo.resolve({"path": "m.py", "symbol": "R.get"})
     assert (r.status, r.start, r.end) == ("resolved", 9, 10)
     assert repo.resolve({"path": "s.pyi", "symbol": "f"}).status == "resolved"
+
+
+def test_focus_must_occur_exactly_once_in_the_range(tmp_path):
+    write(tmp_path, "m.py", '''
+        def place(token, total):
+            check(total)
+            result = pay(
+                token,   total)
+            check(total)
+            return result
+
+
+        def other():
+            pay(token, total)
+    ''')
+    r = Repository(tmp_path)
+
+    def anchors(*focus, symbol="place"):
+        ref = {"path": "m.py", "symbol": symbol, "focus": list(focus)}
+        return r.resolve_focus(ref, r.resolve(ref))
+
+    found, = anchors("pay( token, total)")  # whitespace and line breaks normalized
+    assert found["status"] == "found" and (found["start"], found["end"]) == (3, 4)
+    assert found["cols"] == [13, 23]  # from "pay(" on line 3 to after "total)" on line 4
+    twice, = anchors("check(total)")
+    assert twice["status"] == "ambiguous" and twice["candidates"] == [2, 5]
+    # text outside the ref's range is reported, never used instead
+    gone, = anchors("other()")
+    assert gone["status"] == "missing" and gone["elsewhere"] == [9]
+    none, = anchors("pay(token)")
+    assert none["status"] == "missing" and none.get("elsewhere") is None
+    broken, = anchors("x", symbol="nope")
+    assert broken["status"] == "unresolved"

@@ -304,3 +304,162 @@ def test_json_schema_agrees_with_examples():
         jsonschema.validate(yaml.safe_load(path.read_text()), schema)
     with pytest.raises(jsonschema.ValidationError):
         jsonschema.validate({"schema_version": 1, "nodes": [{"id": "a", "lable": "x"}]}, schema)
+
+
+# ------------------------------------------------------------ schema_version 3
+
+V3 = """
+schema_version: 3
+scope: {summary: test}
+nodes:
+  - {id: area, kind: capability}
+  - {id: caller, parent: area, kind: responsibility}
+  - {id: callee, parent: area, kind: responsibility}
+  - {id: limit, parent: area, kind: rule}
+  - {id: other, kind: capability}
+  - {id: worker, parent: other, kind: responsibility}
+relationships:
+"""
+
+
+def rel_codes(text, version=3):
+    doc = V3.replace("schema_version: 3", f"schema_version: {version}") + text
+    return check(doc)
+
+
+def test_v3_relationship_on_container_is_an_error_but_v2_is_kept():
+    line = "  - {id: r, from: caller, to: other, type: data, label: x}\n"
+    v3 = rel_codes(line)
+    assert "group-endpoint" in codes(v3, "error")
+    v2 = rel_codes(line, version=2)
+    assert "group-endpoint" not in codes(v2) and "legacy-group-endpoint" in codes(v2, "info")
+    # the old meaning is kept: the line is still there, on the container, never on its children
+    rel = v2.model["relationships"][0]
+    assert (rel["from"], rel["to"], rel["group_endpoint"]) == ("caller", "other", ["other"])
+
+
+def test_exchange_legs_must_run_between_the_same_nodes():
+    ok = rel_codes("""
+  - {id: ask, from: caller, to: callee, type: data, label: q, exchange: call, leg: input}
+  - {id: answer, from: callee, to: caller, type: data, label: a, exchange: call, leg: result}
+  - {id: fail, from: callee, to: caller, type: error, label: e, exchange: call, leg: error}
+""")
+    assert "exchange-incoherent" not in codes(ok)
+    (x,) = ok.model["exchanges"]
+    assert x == {"id": "call", "caller": "caller", "callee": "callee", "legs": ["ask", "answer", "fail"]}
+    elsewhere = rel_codes("""
+  - {id: ask, from: caller, to: callee, type: data, label: q, exchange: call, leg: input}
+  - {id: answer, from: worker, to: caller, type: data, label: a, exchange: call, leg: result}
+""")
+    assert "exchange-incoherent" in codes(elsewhere, "error")
+    backwards = rel_codes("""
+  - {id: ask, from: caller, to: callee, type: data, label: q, exchange: call, leg: input}
+  - {id: answer, from: caller, to: callee, type: data, label: a, exchange: call, leg: result}
+""")
+    d = next(d for d in backwards.diagnostics if d.code == "exchange-incoherent")
+    assert d.record == "answer" and "comes back" in d.message
+    two_inputs = rel_codes("""
+  - {id: a1, from: caller, to: callee, type: data, label: q, exchange: call, leg: input}
+  - {id: a2, from: caller, to: callee, type: data, label: q2, exchange: call, leg: input}
+""")
+    assert "exchange-incoherent" in codes(two_inputs, "error")
+
+
+def test_opposite_lines_are_not_paired_without_an_exchange():
+    r = rel_codes("""
+  - {id: ask, from: caller, to: callee, type: data, label: q}
+  - {id: answer, from: callee, to: caller, type: data, label: a}
+""")
+    assert r.model["exchanges"] == []
+    assert all(x["exchange"] is None for x in r.model["relationships"])
+
+
+def test_exchange_id_shares_the_namespace_and_legs_need_a_role():
+    r = rel_codes("  - {id: ask, from: caller, to: callee, type: data, label: q, exchange: caller}\n")
+    assert "exchange-incoherent" in codes(r, "error")
+    r = rel_codes("  - {id: ask, from: caller, to: callee, type: data, label: q, leg: input}\n")
+    assert "leg-without-exchange" in codes(r, "warning")
+    r = rel_codes("  - {id: ask, from: caller, to: callee, type: data, label: q, exchange: x, leg: reply}\n")
+    assert "unknown-leg" in codes(r, "error")
+
+
+def test_observed_data_needs_a_cited_site_in_v3_only():
+    line = "  - {id: r, from: caller, to: callee, type: data, label: x, certainty: observed}\n"
+    assert "observed-without-site" in codes(rel_codes(line), "warning")
+    assert "observed-without-site" not in codes(rel_codes(line.replace("certainty", "evidence"), 2))
+    # inferred claims stay useful without a site
+    assert "observed-without-site" not in codes(rel_codes(line.replace("observed", "inferred")))
+    sited = rel_codes("""
+  - id: r
+    from: caller
+    to: callee
+    type: data
+    label: x
+    certainty: observed
+    refs:
+      - {path: a.py, symbol: f, role: transfer, focus: g(x)}
+""")
+    assert not ({"observed-without-site", "site-without-focus"} & codes(sited))
+    ref = sited.model["relationships"][0]["refs"][0]
+    assert ref["focus"] == ["g(x)"] and ref["role"] == "transfer"
+    unfocused = rel_codes(
+        "  - {id: r, from: caller, to: callee, type: data, label: x, certainty: observed,"
+        " refs: [{path: a.py, symbol: f, role: transfer}]}\n"
+    )
+    assert "site-without-focus" in codes(unfocused, "warning")
+
+
+def test_rule_is_not_a_data_endpoint():
+    r = rel_codes("  - {id: r, from: caller, to: limit, type: data, label: x}\n")
+    assert "rule-endpoint" in codes(r, "warning")
+    r = rel_codes("  - {id: r, from: caller, to: limit, type: dependency, kind: enforces}\n")
+    assert "rule-endpoint" not in codes(r)
+
+
+def test_certainty_replaces_evidence_in_v3():
+    r = check(V3 + "  - {id: r, from: caller, to: callee, type: control, evidence: inferred}\n")
+    assert "renamed-field" in codes(r, "warning")
+    assert r.model["relationships"][0]["certainty"] == "inferred"
+    v2 = check(MINIMAL.replace("kind: responsibility", "kind: responsibility\n    evidence: observed"))
+    assert "renamed-field" not in codes(v2) and v2.model["nodes"][1]["certainty"] == "observed"
+
+
+def test_focus_must_be_text():
+    r = rel_codes("  - {id: r, from: caller, to: callee, type: control, refs: [{path: a.py, focus: []}]}\n")
+    assert "bad-focus" in codes(r, "error")
+    r = rel_codes(
+        "  - {id: r, from: caller, to: callee, type: control,"
+        " refs: [{path: a.py, focus: '  a   =\n  b '}]}\n"
+    )
+    assert r.model["relationships"][0]["refs"][0]["focus"] == ["a = b"]
+
+
+def test_newer_schema_version_is_refused():
+    r = check(V3.replace("schema_version: 3", "schema_version: 4"))
+    d = next(d for d in r.diagnostics if d.code == "unsupported-schema-version")
+    assert d.severity == "error" and "upgrade" in d.hint
+
+
+def test_provenance_fixture_is_clean():
+    from repoluma.workspace import Workspace
+
+    from .conftest import FIXTURES
+
+    a = Workspace.open(FIXTURES / "provenance").analyze(with_git=False)
+    bad = [d for d in a["diagnostics"] if d["severity"] in ("error", "warning")]
+    assert not bad, bad
+    anchors = [x for r in a["model"]["relationships"] for ref in r["refs"] for x in ref["anchors"]]
+    assert anchors and all(x["status"] == "found" for x in anchors)
+
+
+def test_error_is_a_type_of_its_own():
+    r = rel_codes("""
+  - {id: ask, from: caller, to: callee, type: data, label: q, exchange: call, leg: input}
+  - {id: fail, from: callee, to: caller, type: data, label: e, exchange: call, leg: error}
+""")
+    d = next(d for d in r.diagnostics if d.code == "exchange-incoherent")
+    assert d.record == "fail" and "type error" in d.message
+    # an error outside an exchange is fine, needs a label, and is grounded like data
+    r = rel_codes("  - {id: e, from: callee, to: caller, type: error, certainty: observed}\n")
+    assert {"data-without-label", "observed-without-site"} <= codes(r, "warning")
+    assert r.model["relationships"][0]["type"] == "error"

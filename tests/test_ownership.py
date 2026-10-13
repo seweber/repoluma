@@ -270,3 +270,70 @@ def test_code_no_node_shows_is_an_error_but_glue_needs_none(tmp_path):
           - {id: orders, parent: shop, kind: component, refs: [app/orders.py, web/app.js]}
     """)
     assert "unexplained-code" not in diags and not a["ownership"]["rest"]  # whole files count
+
+
+def test_definitions_are_mapped_or_only_covered_broadly(repo):
+    a, _ = analyze(repo, """
+          - id: core
+            owns: [app/core/]
+          - id: engine
+            parent: core
+            refs: [app/core/engine.py#run]
+          - id: money
+            parent: core
+            refs: [app/core/util.py#Money]
+          - id: helpers
+            parent: core
+            refs: [app/core/util.py]
+    """)
+    units = a["ownership"]["units"]
+    assert units["counts"] == {"mapped": 2, "coarse": 3, "unmapped": 0}
+    by_ref = {c["ref"]: c for c in units["coarse"]}
+    assert by_ref["app/core/util.py#Money"]["members"] == ["Money.add", "Money.times"]
+    assert by_ref["app/core/util.py"]["members"] == ["slug"]
+    assert not units["baseline"]
+    codes = [d["code"] for d in a["diagnostics"]]
+    assert codes.count("coarse-mapping") == 2
+
+
+def test_new_definition_inside_a_whole_file_ref_is_reported_after_review(tmp_path):
+    from .conftest import git
+
+    write(tmp_path, "app/util.py", "def slug(text):\n    return text.lower()\n")
+    git(tmp_path, "init", "-q")
+    git(tmp_path, "add", ".")
+    git(tmp_path, "commit", "-qm", "init")
+    rev = git(tmp_path, "rev-parse", "HEAD").strip()
+    write(tmp_path, ".repoluma/map.yaml", f"""
+        schema_version: 3
+        scope: {{summary: t, reviewed_revision: {rev}}}
+        nodes:
+          - {{id: area, owns: [app/]}}
+          - {{id: helpers, parent: area, refs: [app/util.py]}}
+    """)
+    a = Workspace.open(tmp_path).analyze()
+    assert "coarse-new-members" not in {d["code"] for d in a["diagnostics"]}
+    # yesterday's whole-file ref still covers the file, but the new function is named
+    write(tmp_path, "app/util.py", "def slug(text):\n    return text.lower()\n\n\ndef wipe(db):\n    db.clear()\n")
+    a = Workspace.open(tmp_path).analyze()
+    d = next(d for d in a["diagnostics"] if d["code"] == "coarse-new-members")
+    assert d["severity"] == "warning" and "wipe" in d["message"] and d["record"] == "helpers"
+    assert "unexplained-code" not in {x["code"] for x in a["diagnostics"]}
+
+
+def test_type_checking_imports_are_glue(tmp_path):
+    write(tmp_path, "app/x.py", """
+        from typing import TYPE_CHECKING
+
+        if TYPE_CHECKING:
+            from collections.abc import Iterable
+
+
+        def run(xs):
+            return list(xs)
+    """)
+    _, codes = analyze(tmp_path, """
+          - {id: area, owns: [app/]}
+          - {id: run, parent: area, refs: [app/x.py#run]}
+    """)
+    assert "unexplained-code" not in codes

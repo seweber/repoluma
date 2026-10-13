@@ -1,6 +1,6 @@
 """Measure layout quality for maps under different tuning settings.
 
-    uv run --with playwright python bench/layout_eval.py ROOT [ROOT ...]
+    uv run python bench/layout_eval.py ROOT [ROOT ...]
 
 For every region, routes are checked for: crossings between different lines (proper
 orthogonal crossings), shared collinear stretches (overlaps), bends, length in channel
@@ -31,7 +31,7 @@ METRICS = r"""
     if (!byC.has(s.container)) byC.set(s.container, []);
     byC.get(s.container).push(s);
   }
-  let crossings = 0, stubX = 0, overlaps = 0, bends = 0, length = 0, through = 0, lines = 0, steps = 0;
+  let crossings = 0, routeCrossings = 0, stubX = 0, overlaps = 0, bends = 0, length = 0, through = 0, lines = 0, steps = 0;
   const eps = 1e-6;
   for (const [cid, segs] of byC) {
     const C = cid == null ? L.root : L.boxes.get(cid);
@@ -46,8 +46,11 @@ METRICS = r"""
     const kids = cid == null ? L.roots : C.node.children;
     const rects = kids.map((id) => { const b = L.boxes.get(id); const w = b.w * b.scale, h = b.h * b.scale;
       return [b.x + w * 0.02, b.y + h * 0.02, b.x + w * 0.98, b.y + h * 0.98]; });
+    // a pair (an exchange's request and answer) is one route drawn as two lanes: it counts as
+    // two lines, and each crossing of it as two crossings
+    const lanes = segs.map((s) => (s.pair ? 2 : 1));
     pieces.forEach((ps, i) => {
-      lines++;
+      lines += lanes[i];
       bends += Math.max(0, ps.length - 1);
       // a short piece between two bends is a visible "step" (jog) in the line
       for (let k = 1; k < ps.length - 1; k++) {
@@ -72,10 +75,11 @@ METRICS = r"""
             const x = V0[0], y = H0[1];
             if (x > Math.min(H0[0], H1[0]) + eps && x < Math.max(H0[0], H1[0]) - eps &&
                 y > Math.min(V0[1], V1[1]) + eps && y < Math.max(V0[1], V1[1]) - eps) {
-              crossings++;
+              crossings += lanes[i] * lanes[j];
+              routeCrossings++;
               // crossing on a connector piece that touches a box (first/last piece)
               const isStub = (P, piece) => piece === P[0] || piece === P[P.length - 1];
-              if (isStub(ps, ps.find((q) => q[0] === a && q[1] === b)) || isStub(pieces[j], pieces[j].find((q) => q[0] === c && q[1] === d))) stubX++;
+              if (isStub(ps, ps.find((q) => q[0] === a && q[1] === b)) || isStub(pieces[j], pieces[j].find((q) => q[0] === c && q[1] === d))) stubX += lanes[i] * lanes[j];
             }
           } else if (sharePort) {
             continue;
@@ -89,7 +93,7 @@ METRICS = r"""
     });
   }
   const b = L.bounds;
-  return { ms: Math.round(ms), lines, crossings, stubX, overlaps, bends, steps, length: Math.round(length), through,
+  return { ms: Math.round(ms), lines, crossings, routeCrossings, stubX, overlaps, bends, steps, length: Math.round(length), through,
            aspect: +(b.w / b.h).toFixed(2) };
 }
 """

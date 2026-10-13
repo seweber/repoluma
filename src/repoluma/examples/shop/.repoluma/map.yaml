@@ -1,5 +1,5 @@
 # repoluma map of the example shop. Authoring guide: `repoluma guide`.
-schema_version: 2
+schema_version: 3
 
 repository:
   name: shop (example)
@@ -31,7 +31,7 @@ nodes:
     kind: component
     label: Checkout form
     summary: Collects a payment token from the provider widget and submits the cart.
-    evidence: observed
+    certainty: observed
     refs:
       - path: web/checkout.ts
         symbol: submitCheckout
@@ -58,7 +58,7 @@ nodes:
         - On failure, no reservation remains
       errors:
         - CheckoutError for invalid carts, missing stock, or declined payment
-    evidence: observed
+    certainty: observed
     refs:
       - path: shop/orders.py
         symbol: OrderService.place_order
@@ -77,7 +77,7 @@ nodes:
     kind: responsibility
     label: Price the cart
     summary: Sums catalog prices in integer cents; inactive products cannot be bought.
-    evidence: observed
+    certainty: observed
     refs:
       - path: shop/orders.py
         symbol: OrderService.price
@@ -95,7 +95,7 @@ nodes:
     kind: rule
     label: Max 50 lines per cart
     summary: An order has 1 to 50 lines and every quantity is positive.
-    evidence: observed
+    certainty: observed
     refs:
       - path: shop/orders.py
         symbol: MAX_LINES_PER_ORDER
@@ -126,7 +126,7 @@ nodes:
         - ValueError for non-positive amounts
       assumptions:
         - The provider answers synchronously with status "approved" or a reason
-    evidence: observed
+    certainty: observed
     refs:
       - path: shop/payments.py
         symbol: PaymentService.authorize
@@ -142,7 +142,7 @@ nodes:
     kind: responsibility
     label: Capture payment
     summary: Collect previously authorized funds when the order ships.
-    evidence: observed
+    certainty: observed
     refs:
       - path: shop/payments.py
         symbol: PaymentService.capture
@@ -152,7 +152,7 @@ nodes:
     kind: responsibility
     label: Refund payment
     summary: Return money to the original payment, never more than was authorized.
-    evidence: observed
+    certainty: observed
     refs:
       - path: shop/payments.py
         symbol: PaymentService.refund
@@ -166,7 +166,7 @@ nodes:
       inputs: [authorize(token, amount, currency), capture(authorization id), refund(authorization id, amount)]
       outputs: [dict responses; authorize returns status, id and optional reason]
       assumptions: [Calls are synchronous and idempotency is not handled here]
-    evidence: observed
+    certainty: observed
     refs:
       - path: shop/payments.py
         symbol: ProviderClient
@@ -184,7 +184,7 @@ nodes:
     kind: responsibility
     label: Reserve stock
     summary: Holds all requested lines or none.
-    evidence: observed
+    certainty: observed
     refs:
       - path: shop/inventory.py
         symbol: Inventory.reserve
@@ -198,7 +198,7 @@ nodes:
     kind: responsibility
     label: Release reserved stock
     summary: Gives held stock back when an order fails.
-    evidence: observed
+    certainty: observed
     refs:
       - path: shop/inventory.py
         symbol: Inventory.release
@@ -208,7 +208,7 @@ nodes:
     kind: responsibility
     label: Deduct shipped stock
     summary: Converts a reservation into a stock decrement.
-    evidence: observed
+    certainty: observed
     refs:
       - path: shop/inventory.py
         symbol: Inventory.commit
@@ -218,7 +218,7 @@ nodes:
     kind: rule
     label: All lines reserved or none
     summary: If any line lacks stock, nothing is reserved.
-    evidence: observed
+    certainty: observed
     refs:
       - path: shop/inventory.py
         symbol: Inventory.reserve
@@ -231,10 +231,15 @@ nodes:
     kind: resource
     label: Stock levels
     summary: In-memory on-hand and reserved counts per SKU.
-    evidence: observed
+    certainty: observed
     refs:
       - path: shop/inventory.py
         symbol: Inventory
+        note: the counts themselves (fields on_hand and reserved)
+      - path: shop/inventory.py
+        symbol: Inventory.available
+      - path: shop/inventory.py
+        symbol: Inventory.restock
 
   # --------------------------------------------------------------- fulfillment
   - id: fulfillment
@@ -250,7 +255,7 @@ nodes:
     label: Ship order
     summary: Commits stock, captures payment and publishes order.shipped.
     details: Capture happens only here, so customers are charged when goods leave.
-    evidence: observed
+    certainty: observed
     refs:
       - path: shop/fulfillment.py
         symbol: Fulfillment.ship
@@ -270,7 +275,7 @@ nodes:
     kind: responsibility
     label: Accept returned order
     summary: Restocks the goods and refunds the order total.
-    evidence: observed
+    certainty: observed
     refs:
       - path: shop/returns.py
         symbol: accept_return
@@ -280,7 +285,7 @@ nodes:
     kind: rule
     label: No returns after 30 days
     summary: Returns are rejected more than 30 days after delivery.
-    evidence: observed
+    certainty: observed
     refs:
       - path: shop/returns.py
         symbol: RETURN_WINDOW
@@ -295,7 +300,7 @@ nodes:
     kind: rule
     label: Whole-order returns only
     summary: Not supported; only whole orders can be returned. Unclear whether this is intended.
-    evidence: needs_review
+    certainty: needs_review
 
   # ------------------------------------------------------- customer messaging
   - id: messaging
@@ -311,7 +316,7 @@ nodes:
     kind: responsibility
     label: Send order e-mails
     summary: Sends a confirmation e-mail; shipment e-mails are not implemented yet.
-    evidence: observed
+    certainty: observed
     refs:
       - path: shop/notifications.py
         symbol: register
@@ -323,7 +328,7 @@ nodes:
     kind: resource
     label: Order event bus
     summary: In-process publish/subscribe for order.confirmed and order.shipped.
-    evidence: observed
+    certainty: observed
     refs:
       - path: shop/events.py
         symbol: EventBus
@@ -342,7 +347,7 @@ nodes:
     kind: data
     label: Money amounts
     summary: Amounts in integer cents with a currency; adding different currencies is an error.
-    evidence: observed
+    certainty: observed
     refs:
       - path: shop/money.py
         symbol: Money
@@ -352,7 +357,7 @@ nodes:
     kind: external
     label: Payment provider
     summary: Third-party service that authorizes, captures and refunds card payments.
-    evidence: inferred
+    certainty: inferred
 
   - id: customer
     kind: actor
@@ -360,61 +365,514 @@ nodes:
     summary: Buys products and may return them.
 
 relationships:
-  # data: from = where the data comes from, to = where it goes; label = the data
-  - {id: customer-checks-out, from: customer, to: checkout-form, type: data, label: cart and payment token}
-  - {id: customer-returns, from: customer, to: accept-return, type: data, label: returned order, evidence: inferred}
+  # Data goes from `from` to `to`, labelled with the data. A call and what comes back share an
+  # `exchange`: one `input` leg and its `result` / `error` legs. Each data line cites where the
+  # data is handed over (`transfer`) or taken in (`receive`), with `focus` on the exact text.
+
+  # ------------------------------------------------------------ checkout (browser)
+  - id: customer-checks-out
+    from: customer
+    to: checkout-form
+    type: data
+    label: cart and payment token
+    certainty: inferred
+    notes: The page that calls submitCheckout is not in this repository; the parameters show what it receives.
+    refs:
+      - path: web/checkout.ts
+        symbol: submitCheckout
+        role: receive
+        focus: "submitCheckout(lines: CartLine[], paymentToken: string)"
+
   - id: form-submits-order
     from: checkout-form
     to: place-order
     type: data
     label: order request (POST /api/orders)
-    evidence: needs_review
-    notes: The HTTP handler between these is not in the repository.
-  - {id: order-prices, from: pricing, to: place-order, type: data, label: order total, evidence: observed}
-  - {id: order-reserves, from: place-order, to: reserve-stock, type: data, label: order lines, evidence: observed}
-  - {id: order-authorizes, from: place-order, to: authorize-payment, type: data, label: payment token and total, evidence: observed}
-  - {id: authorization-returned, from: authorize-payment, to: place-order, type: data, label: authorization, evidence: observed}
-  - {id: order-releases, from: place-order, to: release-stock, type: data, label: reservation (on decline), evidence: observed}
-  - {id: order-publishes, from: place-order, to: event-bus, type: data, kind: event, label: order.confirmed, evidence: observed}
-  - {id: auth-uses-provider, from: authorize-payment, to: provider-port, type: data, label: token and amount, evidence: observed}
-  - {id: capture-uses-provider, from: capture-payment, to: provider-port, type: data, label: authorization id, evidence: observed}
-  - {id: refund-uses-provider, from: refund-payment, to: provider-port, type: data, label: authorization id and amount, evidence: observed}
-  - {id: reserve-writes, from: reserve-stock, to: inventory-store, type: data, label: reserved quantities, evidence: observed}
-  - {id: release-writes, from: release-stock, to: inventory-store, type: data, label: released quantities, evidence: observed}
-  - {id: commit-writes, from: commit-stock, to: inventory-store, type: data, label: shipped quantities, evidence: observed}
-  - {id: ship-commits, from: ship-order, to: commit-stock, type: data, label: reservation, evidence: observed}
-  - {id: ship-captures, from: ship-order, to: capture-payment, type: data, label: authorization, evidence: observed}
-  - {id: ship-publishes, from: ship-order, to: event-bus, type: data, kind: event, label: order.shipped, evidence: observed}
-  - {id: return-restocks, from: accept-return, to: inventory-store, type: data, label: returned quantities, evidence: observed}
-  - {id: return-refunds, from: accept-return, to: refund-payment, type: data, label: authorization and order total, evidence: observed}
-  - {id: emails-subscribe, from: event-bus, to: order-emails, type: data, kind: event, label: order.confirmed, evidence: observed}
-  - {id: emails-to-customer, from: order-emails, to: customer, type: data, label: confirmation e-mail, evidence: observed}
-  # dependency: from relies on, implements or is constrained by to
-  - {id: order-enforces-limits, from: place-order, to: cart-limits, type: dependency, kind: enforces, evidence: observed}
-  - {id: provider-implements-port, from: payment-provider, to: provider-port, type: dependency, kind: implements, evidence: inferred, notes: No adapter exists in this repository; tests use a fake.}
-  - {id: reserve-enforces, from: reserve-stock, to: no-partial-reservations, type: dependency, kind: enforces, evidence: observed}
-  - {id: return-enforces-window, from: accept-return, to: return-window, type: dependency, kind: enforces, evidence: observed}
+    certainty: needs_review
+    exchange: checkout-request
+    leg: input
+    notes: The HTTP handler between the form and place_order is not in this repository, so it is not known how the request becomes the arguments of place_order.
+    refs:
+      - path: web/checkout.ts
+        symbol: submitCheckout
+        role: transfer
+        focus: "body: JSON.stringify({ lines, paymentToken })"
+
+  - id: order-id-returned
+    from: place-order
+    to: checkout-form
+    type: data
+    label: order id (402 if declined)
+    certainty: needs_review
+    exchange: checkout-request
+    leg: result
+    notes: The form reads orderId and treats status 402 as a declined payment; the handler that would turn the Order or CheckoutError into that response is not in this repository.
+    refs:
+      - path: web/checkout.ts
+        symbol: submitCheckout
+        role: receive
+        focus: [response.status === 402, return body.orderId;]
+
+  # ------------------------------------------------------------------ ordering
+  - id: order-sends-lines
+    from: place-order
+    to: pricing
+    type: data
+    label: cart lines
+    certainty: observed
+    exchange: price-cart
+    leg: input
+    refs:
+      - path: shop/orders.py
+        symbol: OrderService.place_order
+        role: transfer
+        focus: total = self.price(lines)
+
+  - id: order-prices
+    from: pricing
+    to: place-order
+    type: data
+    label: order total
+    certainty: observed
+    exchange: price-cart
+    leg: result
+    refs:
+      - path: shop/orders.py
+        symbol: OrderService.price
+        role: origin
+        focus: total = total + self.catalog.get(sku).price.times(qty)
+      - path: shop/orders.py
+        symbol: OrderService.price
+        role: transfer
+        focus: return total
+      - path: shop/orders.py
+        symbol: OrderService.place_order
+        role: receive
+        focus: total = self.price(lines)
+
+  - id: order-reserves
+    from: place-order
+    to: reserve-stock
+    type: data
+    label: order lines
+    certainty: observed
+    exchange: reserve-lines
+    leg: input
+    refs:
+      - path: shop/orders.py
+        symbol: OrderService.place_order
+        role: transfer
+        focus: reservation = self.inventory.reserve(lines)
+
+  - id: reservation-returned
+    from: reserve-stock
+    to: place-order
+    type: data
+    label: reservation
+    certainty: observed
+    exchange: reserve-lines
+    leg: result
+    refs:
+      - path: shop/inventory.py
+        symbol: Inventory.reserve
+        role: transfer
+        focus: return Reservation(id=str(uuid.uuid4()), lines=dict(lines))
+      - path: shop/orders.py
+        symbol: OrderService.place_order
+        role: receive
+        focus: reservation = self.inventory.reserve(lines)
+
+  - id: stock-shortage
+    from: reserve-stock
+    to: place-order
+    type: error
+    label: out of stock (SKU)
+    certainty: observed
+    exchange: reserve-lines
+    leg: error
+    summary: Nothing has been reserved when this is raised; place_order turns it into a CheckoutError.
+    refs:
+      - path: shop/inventory.py
+        symbol: Inventory.reserve
+        role: transfer
+        focus: raise OutOfStock(sku)
+      - path: shop/orders.py
+        symbol: OrderService.place_order
+        role: receive
+        focus: [except OutOfStock as exc, 'raise CheckoutError(f"out of stock: {exc}") from exc']
+
+  - id: order-authorizes
+    from: place-order
+    to: authorize-payment
+    type: data
+    label: payment token and total
+    certainty: observed
+    exchange: payment-authorization
+    leg: input
+    refs:
+      - path: shop/orders.py
+        symbol: OrderService.place_order
+        role: transfer
+        focus: self.payments.authorize(payment_token, total)
+      - path: shop/orders.py
+        symbol: OrderService.place_order
+        role: origin
+        note: the token is a parameter of place_order (from the caller); the total comes from pricing
+        focus: ["payment_token: str", total = self.price(lines)]
+      - path: shop/payments.py
+        symbol: PaymentService.authorize
+        role: receive
+        focus: "def authorize(self, payment_token: str, amount: Money) -> Authorization:"
+
+  - id: authorization-returned
+    from: authorize-payment
+    to: place-order
+    type: data
+    label: authorization
+    certainty: observed
+    exchange: payment-authorization
+    leg: result
+    refs:
+      - path: shop/payments.py
+        symbol: PaymentService.authorize
+        role: transfer
+        focus: 'return Authorization(id=response["id"], amount=amount)'
+      - path: shop/orders.py
+        symbol: OrderService.place_order
+        role: receive
+        focus: authorization = self.payments.authorize
+      - path: shop/orders.py
+        symbol: OrderService.place_order
+        role: origin
+        note: kept on the confirmed order, where shipping and returns find it later
+        focus: '"confirmed", reservation, authorization,'
+
+  - id: payment-declined
+    from: authorize-payment
+    to: place-order
+    type: error
+    label: decline reason
+    certainty: observed
+    exchange: payment-authorization
+    leg: error
+    summary: Raised instead of a result when the provider does not approve; no authorization exists on this path.
+    refs:
+      - path: shop/payments.py
+        symbol: PaymentService.authorize
+        role: transfer
+        focus: 'raise PaymentDeclined(response.get("reason", "declined"))'
+      - path: shop/orders.py
+        symbol: OrderService.place_order
+        role: receive
+        focus: except PaymentDeclined as exc
+
+  - id: order-releases
+    from: place-order
+    to: release-stock
+    type: data
+    label: reservation (on decline)
+    certainty: observed
+    summary: Only on the declined path, so that nothing stays held; the caller then gets a CheckoutError.
+    refs:
+      - path: shop/orders.py
+        symbol: OrderService.place_order
+        role: transfer
+        focus: self.inventory.release(reservation)
+      - path: shop/inventory.py
+        symbol: Inventory.release
+        role: receive
+        focus: "def release(self, reservation: Reservation) -> None:"
+
+  - id: order-publishes
+    from: place-order
+    to: event-bus
+    type: data
+    kind: event
+    label: order.confirmed
+    certainty: observed
+    summary: Published after the order is stored; nothing comes back to the publisher.
+    refs:
+      - path: shop/orders.py
+        symbol: OrderService.place_order
+        role: transfer
+        focus: 'self.bus.publish("order.confirmed", {"order_id": order.id, "customer": customer})'
+      - path: shop/events.py
+        symbol: EventBus.publish
+        role: receive
+        focus: "def publish(self, topic: str, payload: dict) -> None:"
+
+  # ------------------------------------------------------------------ payments
+  - id: auth-uses-provider
+    from: authorize-payment
+    to: provider-port
+    type: data
+    label: token and amount
+    certainty: observed
+    exchange: provider-authorize
+    leg: input
+    refs:
+      - path: shop/payments.py
+        symbol: PaymentService.authorize
+        role: transfer
+        focus: response = self.provider.authorize(payment_token, amount.cents, amount.currency)
+
+  - id: provider-answers
+    from: provider-port
+    to: authorize-payment
+    type: data
+    label: provider response (status, id, reason)
+    certainty: observed
+    exchange: provider-authorize
+    leg: result
+    notes: Only the receiving side is in this repository; the provider's adapter that builds the response is not (tests use a fake).
+    refs:
+      - path: shop/payments.py
+        symbol: ProviderClient.authorize
+        role: origin
+        note: the interface only promises a dict
+        focus: "def authorize(self, token: str, amount_cents: int, currency: str) -> dict: ..."
+      - path: shop/payments.py
+        symbol: PaymentService.authorize
+        role: receive
+        focus: [response = self.provider.authorize, 'response.get("status") != "approved"']
+
+  - id: capture-uses-provider
+    from: capture-payment
+    to: provider-port
+    type: data
+    label: authorization id
+    certainty: observed
+    summary: The provider's answer is ignored.
+    refs:
+      - path: shop/payments.py
+        symbol: PaymentService.capture
+        role: transfer
+        focus: self.provider.capture(authorization.id)
+
+  - id: refund-uses-provider
+    from: refund-payment
+    to: provider-port
+    type: data
+    label: authorization id and amount
+    certainty: observed
+    summary: Only after checking that the amount does not exceed what was authorized; the answer is ignored.
+    refs:
+      - path: shop/payments.py
+        symbol: PaymentService.refund
+        role: transfer
+        focus: self.provider.refund(authorization.id, amount.cents)
+
+  # --------------------------------------------------------------------- stock
+  - id: stock-available
+    from: inventory-store
+    to: reserve-stock
+    type: data
+    label: available quantities
+    certainty: observed
+    refs:
+      - path: shop/inventory.py
+        symbol: Inventory.available
+        role: origin
+        focus: return self.on_hand.get(sku, 0) - self.reserved.get(sku, 0)
+      - path: shop/inventory.py
+        symbol: Inventory.reserve
+        role: receive
+        focus: "if self.available(sku) < qty:"
+
+  - id: reserve-writes
+    from: reserve-stock
+    to: inventory-store
+    type: data
+    label: reserved quantities
+    certainty: observed
+    summary: Written only after every line was checked, so a shortage leaves the counts untouched.
+    refs:
+      - path: shop/inventory.py
+        symbol: Inventory.reserve
+        role: transfer
+        focus: self.reserved[sku] = self.reserved.get(sku, 0) + qty
+
+  - id: release-writes
+    from: release-stock
+    to: inventory-store
+    type: data
+    label: released quantities
+    certainty: observed
+    refs:
+      - path: shop/inventory.py
+        symbol: Inventory.release
+        role: transfer
+        focus: self.reserved[sku] -= qty
+
+  - id: commit-writes
+    from: commit-stock
+    to: inventory-store
+    type: data
+    label: shipped quantities
+    certainty: observed
+    refs:
+      - path: shop/inventory.py
+        symbol: Inventory.commit
+        role: transfer
+        focus: ['self.reserved[sku] -= qty', 'self.on_hand[sku] -= qty']
+
+  # --------------------------------------------------------------- fulfillment
+  - id: ship-commits
+    from: ship-order
+    to: commit-stock
+    type: data
+    label: reservation
+    certainty: observed
+    refs:
+      - path: shop/fulfillment.py
+        symbol: Fulfillment.ship
+        role: transfer
+        focus: self.inventory.commit(order.reservation)
+      - path: shop/orders.py
+        symbol: OrderService.place_order
+        role: origin
+        note: the reservation was attached to the order when it was confirmed
+        focus: '"confirmed", reservation, authorization,'
+
+  - id: ship-captures
+    from: ship-order
+    to: capture-payment
+    type: data
+    label: authorization
+    certainty: observed
+    refs:
+      - path: shop/fulfillment.py
+        symbol: Fulfillment.ship
+        role: transfer
+        focus: self.payments.capture(order.authorization)
+      - path: shop/orders.py
+        symbol: OrderService.place_order
+        role: origin
+        note: the authorization was attached to the order when it was confirmed
+        focus: '"confirmed", reservation, authorization,'
+
+  - id: ship-publishes
+    from: ship-order
+    to: event-bus
+    type: data
+    kind: event
+    label: order.shipped
+    certainty: observed
+    summary: Published after stock and payment are settled. Its subscriber does nothing yet (see Send order e-mails).
+    refs:
+      - path: shop/fulfillment.py
+        symbol: Fulfillment.ship
+        role: transfer
+        focus: 'self.bus.publish("order.shipped", {"order_id": order.id, "tracking": tracking_code})'
+
+  # ------------------------------------------------------------------- returns
+  - id: return-restocks
+    from: accept-return
+    to: inventory-store
+    type: data
+    label: returned quantities
+    certainty: observed
+    refs:
+      - path: shop/returns.py
+        symbol: accept_return
+        role: transfer
+        focus: inventory.restock(sku, qty)
+      - path: shop/inventory.py
+        symbol: Inventory.restock
+        role: receive
+        focus: self.on_hand[sku] = self.on_hand.get(sku, 0) + qty
+
+  - id: return-refunds
+    from: accept-return
+    to: refund-payment
+    type: data
+    label: authorization and order total
+    certainty: observed
+    refs:
+      - path: shop/returns.py
+        symbol: accept_return
+        role: transfer
+        focus: payments.refund(order.authorization, order.total)
+      - path: shop/payments.py
+        symbol: PaymentService.refund
+        role: receive
+        focus: "def refund(self, authorization: Authorization, amount: Money) -> None:"
+
+  # ------------------------------------------------------- customer messaging
+  - id: emails-subscribe
+    from: event-bus
+    to: order-emails
+    type: data
+    kind: event
+    label: order.confirmed
+    certainty: observed
+    refs:
+      - path: shop/events.py
+        symbol: EventBus.publish
+        role: transfer
+        focus: handler(payload)
+      - path: shop/notifications.py
+        symbol: register
+        role: receive
+        note: the subscription routes this topic to the handler
+        focus: ['bus.subscribe("order.confirmed", on_confirmed)', "def on_confirmed(event: dict) -> None:"]
+
+  - id: emails-to-customer
+    from: order-emails
+    to: customer
+    type: data
+    label: confirmation e-mail
+    certainty: inferred
+    notes: The Mailer only records the message in an in-memory outbox; how it reaches the customer is not in this repository.
+    refs:
+      - path: shop/notifications.py
+        symbol: register
+        role: transfer
+        focus: 'mailer.send(email_for(event["customer"]), "Your order is confirmed")'
+      - path: shop/notifications.py
+        symbol: Mailer.send
+        role: receive
+        focus: self.outbox.append((to, subject))
+
+  - id: customer-returns
+    from: customer
+    to: accept-return
+    type: data
+    label: returned order
+    certainty: inferred
+    notes: No caller of accept_return is in this repository (no return form or endpoint).
+
+  # ------------------------------------------------------------- dependencies
+  # from relies on, implements or is constrained by to
+  - {id: order-enforces-limits, from: place-order, to: cart-limits, type: dependency, kind: enforces, certainty: observed}
+  - {id: provider-implements-port, from: payment-provider, to: provider-port, type: dependency, kind: implements, certainty: inferred, notes: No adapter exists in this repository; tests use a fake.}
+  - {id: reserve-enforces, from: reserve-stock, to: no-partial-reservations, type: dependency, kind: enforces, certainty: observed}
+  - {id: return-enforces-window, from: accept-return, to: return-window, type: dependency, kind: enforces, certainty: observed}
 
 flows:
   - id: flow-place-order
     label: Place an order
-    summary: From checkout form to confirmed order, including the declined-payment path.
-    evidence: observed
+    summary: From checkout form to confirmed order, including missing stock and the declined-payment path.
+    certainty: observed
     steps:
       - {id: submit, node: checkout-form, label: Customer submits cart and payment token, via: form-submits-order}
       - {id: validate, node: cart-limits, label: Check line count and quantities, via: order-enforces-limits}
-      - {id: price, node: pricing, label: Price the cart from the catalog, via: order-prices}
+      - {id: price, node: pricing, label: Price the cart from the catalog, via: order-sends-lines}
+      - {id: total, node: place-order, label: The order total comes back, via: order-prices}
       - {id: reserve, node: reserve-stock, label: Reserve every line or fail, via: order-reserves}
-      - {id: out-of-stock, node: place-order, kind: failure, after: reserve, label: "Out of stock: CheckoutError, nothing held"}
+      - {id: out-of-stock, node: place-order, kind: failure, after: reserve, label: "Out of stock: CheckoutError, nothing held", via: stock-shortage}
+      - {id: reserved, node: place-order, after: reserve, label: The reservation comes back, via: reservation-returned}
       - {id: authorize, node: authorize-payment, label: Ask provider to hold funds, via: order-authorizes}
-      - {id: declined, node: release-stock, kind: compensation, after: authorize, label: "Declined: release reservation, CheckoutError", via: order-releases}
+      - {id: declined, node: place-order, kind: failure, after: authorize, label: "Provider declines: PaymentDeclined with its reason", via: payment-declined}
+      - {id: release, node: release-stock, kind: compensation, after: declined, label: "Release the reservation, then CheckoutError", via: order-releases}
+      - {id: authorized, node: place-order, after: authorize, label: "Approved: the authorization comes back", via: authorization-returned}
       - {id: confirm, node: event-bus, label: Order confirmed and announced, via: order-publishes}
       - {id: email, node: order-emails, label: Confirmation e-mail sent, via: emails-subscribe}
 
   - id: flow-ship-and-return
     label: Ship, then return
     summary: What happens to stock and money after confirmation.
-    evidence: observed
+    certainty: observed
     steps:
       - {id: ship, node: ship-order, label: Warehouse ships the order}
       - {id: commit, node: commit-stock, label: Reserved stock leaves on-hand, via: ship-commits}

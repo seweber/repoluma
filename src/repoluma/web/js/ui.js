@@ -7,7 +7,7 @@ import { DISPLAYABLE, EVIDENCE_LABEL, REL_TYPES, kindLabel, relText } from "./la
 import { clear, copyText, el, plural } from "./util.js";
 
 const EVIDENCE_HELP = {
-  observed: "Directly supported by the referenced source.",
+  observed: "The author read the code and it does this. Not executed or verified by repoluma.",
   inferred: "An interpretation drawn from source, tests or docs.",
   needs_review: "Plausible but not checked carefully.",
   unknown: "A known gap: not established.",
@@ -31,9 +31,9 @@ const REF_STATUS = {
   not_a_file: ["bad", "not a file"],
 };
 
-function evidenceBadge(ev) {
-  if (!ev) return el("span", { class: "pill muted", title: "No evidence status was stated",
-    text: "evidence not stated" });
+function certaintyBadge(ev) {
+  if (!ev) return el("span", { class: "pill muted", title: "The map does not say how sure this claim is",
+    text: "certainty not stated" });
   return el("span", { class: `pill ev-${ev}`, title: EVIDENCE_HELP[ev] || "",
     text: EVIDENCE_LABEL[ev] || ev });
 }
@@ -120,7 +120,7 @@ function renderUnmapped(app) {
 function renderNode(app, id) {
   if (id === UNMAPPED_ID) return renderUnmapped(app);
   const n = app.nodeById.get(id);
-  if (!n) return el("p", { class: "muted", text: `Node '${id}' no longer exists.` });
+  if (!n) return missingRecord(app, "node", id);
   const chain = app.layout.ancestors.get(id) || [id];
   const crumbs = el("nav", { class: "insp-crumbs", "aria-label": "Containment" },
     chain.slice(0, -1).map((a) => [nodeLink(app, a), el("span", { class: "muted", text: " › " })]));
@@ -139,8 +139,9 @@ function renderNode(app, id) {
   const impact = computeImpact(app, id);
 
   return el("div", { class: "insp" },
+    backButton(app),
     crumbs,
-    el("div", { class: "insp-kind" }, kindLabel(n.kind).toUpperCase(), " ", evidenceBadge(n.evidence),
+    el("div", { class: "insp-kind" }, kindLabel(n.kind).toUpperCase(), " ", certaintyBadge(n.certainty),
       n.confidence ? el("span", { class: "pill", title: "Author's stated confidence; an annotation, not a probability" }, n.confidence + " confidence") : null),
     el("h2", { text: n.label }),
     el("div", { class: "insp-id" },
@@ -155,9 +156,10 @@ function renderNode(app, id) {
     section("Contract", contract),
     n.notes ? section("Notes", el("p", { text: n.notes })) : null,
     renderOwned(app, id),
+    renderCoarse(app, id),
     section("Evidence in source",
       (n.refs || []).length ? el("ul", { class: "refs" }, n.refs.map((r) => refRow(app, r, id))) :
-        el("p", { class: "muted small", text: n.evidence === "planned" ? "Planned: no implementation expected yet." :
+        el("p", { class: "muted small", text: n.certainty === "planned" ? "Planned: no implementation expected yet." :
           n.children.length ? "No direct references; see contained items." :
             "No source reference: this claim is not linked to evidence." })),
     section("Relationships",
@@ -226,6 +228,19 @@ function renderOwned(app, id) {
   return section(id === UNMAPPED_ID ? "Files without an owner" : "Files", body);
 }
 
+/** Code this node accounts for only through a broad ref (its class, the whole file). */
+function renderCoarse(app, id) {
+  const coarse = (app.data.ownership?.units?.coarse || []).filter((c) => c.node === id);
+  if (!coarse.length) return null;
+  return section("Covered only broadly",
+    el("p", { class: "small muted", text: "These definitions are inside a ref of this node but no node describes them in particular. That is fine for a cohesive class or module; new code added there is covered silently, so it is listed." }),
+    coarse.map((c) => el("details", { class: "coarse" },
+      el("summary", {}, el("code", { text: c.ref }), el("span", { class: "muted small", text: ` ${plural(c.members.length, "definition")}` }),
+        c.new.length ? el("span", { class: "pill warn", title: "Added since scope.reviewed_revision", text: `${c.new.length} new since review` }) : null),
+      el("ul", { class: "small mono" }, c.members.map((m) => el("li", {}, m,
+        c.new.includes(m) ? el("span", { class: "pill warn", text: "new" }) : null))))));
+}
+
 const paneKey = (at) => at.node + (at.ref && at.ref.endsWith("#~rest") ? "|unexplained" : "");
 
 // owner colours in the file view: distinct per owner within one file, in order of appearance
@@ -261,6 +276,7 @@ function renderFile(app, path, line) {
   const code = el("div", { class: "file-code", "aria-label": `Source of ${path}` },
     el("p", { class: "muted small", text: "loading source…" }));
   const view = el("div", { class: "insp file-view" },
+    backButton(app),
     el("div", { class: "insp-kind", text: "FILE" }),
     el("h2", { class: "file-title" }, el("span", { class: "fl-name", text: name })),
     el("div", { class: "insp-id" }, el("code", { class: "fl-path", text: dir + name }),
@@ -363,35 +379,274 @@ function relGroup(app, title, rels, endKey) {
       el("ul", {}, list.map((r) => el("li", {},
         nodeLink(app, r[endKey]),
         el("span", { class: "muted small", text: ` — ${relText(r)}${r.type !== "data" && r.label ? ": " + r.label : ""}` }),
-        r.evidence && r.evidence !== "observed" ? el("span", { class: `pill ev-${r.evidence}`, text: EVIDENCE_LABEL[r.evidence] }) : null,
+        r.leg ? el("span", { class: "pill leg", text: r.leg }) : null,
+        r.certainty && r.certainty !== "observed" ? el("span", { class: `pill ev-${r.certainty}`, text: EVIDENCE_LABEL[r.certainty] }) : null,
         el("button", { class: "link small", title: "Inspect relationship", onclick: () => app.select({ type: "relationship", id: r.id }) }, "details")))))));
+}
+
+// ---------------------------------------------------------- relationships
+
+const ROLE_INFO = {
+  transfer: ["Handed over", "where the data leaves: the call's arguments, a return, a publish, a write"],
+  receive: ["Taken in", "where the other end receives it: a parameter, the assignment of a result, a read"],
+  origin: ["Made", "where the data is created, computed, assembled or configured"],
+};
+const ROLE_ORDER = ["transfer", "receive", "origin"];
+const LEG_TEXT = {
+  input: "what the caller supplies", result: "what comes back", response: "what arrives later",
+  error: "what comes back on failure",
+};
+const FOCUS_STATUS = {
+  found: ["ok", "text found once"],
+  missing: ["bad", "text not found"],
+  ambiguous: ["bad", "text occurs several times"],
+  unresolved: ["bad", "range not available"],
+};
+const SINCE_REVIEW = {
+  unchanged: ["ok", "file unchanged since review"],
+  text_unchanged: ["approx", "file changed since review; this text was there then"],
+  text_new: ["warn", "text is new or changed since review"],
+  unknown: ["muted", "freshness unknown (no reviewed revision)"],
+};
+const CONTEXT = 3; // lines shown around a focused statement
+const MAX_EXCERPT = 400;
+
+/** A node with where it sits ("in Ordering"), so a line's ends are named exactly. */
+function endpoint(app, id) {
+  const chain = app.layout.ancestors.get(id) || [id];
+  const where = chain.slice(0, -1).map((a) => app.nodeById.get(a)?.label || a).join(" › ");
+  return el("span", {}, nodeLink(app, id), where ? el("span", { class: "muted small", text: ` in ${where}` }) : null);
+}
+
+function relSummaryLine(app, r) {
+  const label = (x) => app.nodeById.get(x)?.label || x;
+  return `${label(r.from)} → ${label(r.to)}`;
 }
 
 function renderRelationship(app, id) {
   const r = app.relById.get(id);
-  if (!r) return el("p", { class: "muted", text: `Relationship '${id}' no longer exists.` });
-  return el("div", { class: "insp" },
-    el("div", { class: "insp-kind" }, `${r.type.toUpperCase()} RELATIONSHIP `,
-      r.kind ? el("span", { class: `cat rel-${r.type}`, text: r.kind.replace("_", " ") }) : null, " ", evidenceBadge(r.evidence)),
-    el("h2", {}, nodeLink(app, r.from), el("span", { class: "muted", text: "  →  " }), nodeLink(app, r.to)),
-    el("div", { class: "insp-id" }, el("code", { text: r.id })),
-    r.label ? el("p", { class: "insp-summary", text: r.label }) : null,
-    r.summary ? el("p", { text: r.summary }) : null,
+  if (!r) return missingRecord(app, "relationship", id);
+  const x = app.exchangeById.get(r.exchange);
+  const sites = (r.refs || []).filter((ref) => ref.role === "transfer" || ref.role === "receive");
+  const byRole = new Map(ROLE_ORDER.map((role) => [role, []]));
+  const other = [];
+  for (const ref of r.refs || []) (byRole.get(ref.role) || other).push(ref);
+  const missingSite = (r.type === "data" || r.type === "error") && !sites.length ? el("p", { class: "small warn missing-evidence",
+    text: r.certainty === "observed" ?
+      `No site is cited where this ${r.type} is handed over or taken in, although the claim is marked observed. The map does not link it to the code that moves it.` :
+      `No site is cited where this ${r.type} is handed over or taken in.` + (r.certainty ? ` The claim is marked ${EVIDENCE_LABEL[r.certainty] || r.certainty}.` : "") }) : null;
+  return el("div", { class: "insp rel-insp" },
+    backButton(app),
+    el("div", { class: "insp-kind" }, `${r.type.toUpperCase()} `,
+      r.leg ? el("span", { class: "pill leg", title: LEG_TEXT[r.leg] || "", text: r.leg }) : null, " ",
+      r.kind ? el("span", { class: `cat rel-${r.type}`, text: r.kind.replace("_", " ") }) : null, " ", certaintyBadge(r.certainty)),
+    el("h2", { class: "rel-title", text: r.type === "data" || r.type === "error" ? relText(r) : `${relText(r)}${r.label ? ": " + r.label : ""}` }),
+    el("div", { class: "rel-ends" },
+      el("div", {}, el("span", { class: "muted small", text: "from " }), endpoint(app, r.from)),
+      el("div", {}, el("span", { class: "muted small", text: "to " }), endpoint(app, r.to))),
+    el("div", { class: "insp-id" },
+      el("code", { text: r.id }),
+      el("button", { class: "btn small", title: "Copy this relationship and its evidence for a coding agent",
+        onclick: async () => app.toast(await copyText(app.relationshipSummary(id)) ? "Copied relationship for your agent" : "Copy failed") }, "Copy for agent"),
+      el("button", { class: "btn small", title: "Copy a link that restores this view",
+        onclick: async () => app.toast(await copyText(location.href) ? "Copied link to this view" : "Copy failed") }, "Copy link"),
+      el("button", { class: "btn small", title: "Move the map so both ends are visible", onclick: () => app.flyToRelationship(id) }, "Show ends")),
+    r.summary ? el("p", { class: "insp-summary", text: r.summary }) : null,
+    r.group_endpoint?.length ? el("p", { class: "small warn", text: `This line ends on ${r.group_endpoint.map((e) => app.nodeById.get(e)?.label || e).join(" and ")}, a container (allowed in schema_version 2 maps). Which item inside does the work is not stated.` }) : null,
+    x ? renderExchange(app, x, id) : null,
     r.notes ? section("Notes", el("p", { text: r.notes })) : null,
-    section("Evidence in source", (r.refs || []).length ? el("ul", { class: "refs" }, r.refs.map((x) => refRow(app, x, r.from))) :
-      el("p", { class: "muted small", text: "No source reference for this relationship." })),
+    section("Where it happens in the code",
+      el("p", { class: "small muted", text: "Three separate signals: certainty is the author's claim; location says whether the cited text was found; freshness says whether it changed since the map was reviewed. A found text shows where to look, not that the claim is right." }),
+      missingSite,
+      [...byRole.entries()].flatMap(([role, refs]) => refs.map((ref) => evidenceCard(app, r, ref, role))),
+      other.length ? el("div", { class: "ev-other" }, el("h4", { text: "Other references" }),
+        el("ul", { class: "refs" }, other.map((ref) => refRow(app, ref, r.from)))) : null,
+      !(r.refs || []).length && r.type !== "data" && r.type !== "error" ? el("p", { class: "muted small", text: "No source reference for this relationship." }) : null),
     el("p", { class: "small muted", text: `Defined at ${app.data.map_path}:${r.line || "?"}` }));
+}
+
+/** The legs of an exchange: what was supplied and what came back, each selectable. */
+function renderExchange(app, x, current) {
+  const label = (n) => app.nodeById.get(n)?.label || n;
+  return section("Exchange",
+    el("p", { class: "small" }, `${label(x.caller)} and ${label(x.callee)} — `, el("code", { text: x.id })),
+    el("ul", { class: "legs" }, x.legs.map((lid) => {
+      const o = app.relById.get(lid);
+      if (!o) return null;
+      const here = lid === current;
+      return el("li", { class: here ? "current" : "" },
+        el("span", { class: "pill leg", text: o.leg || "?" }), " ",
+        here ? el("strong", { text: relText(o) }) :
+          el("button", { class: "link", title: "Inspect this leg", onclick: () => app.select({ type: "relationship", id: lid }) }, relText(o)),
+        el("span", { class: "muted small", text: `  ${o.from === x.caller ? "→" : "←"} ${LEG_TEXT[o.leg] || ""}` }),
+        here ? el("span", { class: "muted small", text: " (this line)" }) : null);
+    })));
+}
+
+/** One pill per focus status: "3 texts found once", "1 text not found". */
+function focusPills(anchors) {
+  const by = new Map();
+  for (const a of anchors) by.set(a.status, [...(by.get(a.status) || []), a]);
+  return [...by.entries()].map(([st, list]) => {
+    const [cls, text] = FOCUS_STATUS[st] || ["bad", st];
+    const label = list.length === 1 ? text : text.replace(/^text/, `${list.length} texts`);
+    return statusPill([cls, label], list.map((a) => `“${a.text}”: ${a.message}`).join("\n"));
+  });
+}
+
+function statusPill([cls, text], title) {
+  return el("span", { class: `pill st-${cls}`, title: title || null, text });
+}
+
+/**
+ * One cited site: its role, where it is, the three signals, and the code around the focused
+ * text, loaded on demand. The highlighted text is what the author pointed at.
+ */
+function evidenceCard(app, r, ref, role) {
+  const res = app.refs[ref.key] || { status: "unknown", message: "not resolved" };
+  const [rcls, rtext] = REF_STATUS[res.status] || ["bad", res.status];
+  const anchors = ref.anchors || [];
+  const info = ROLE_INFO[role];
+  const code = el("div", { class: "ev-code" });
+  const card = el("div", { class: `ev-card role-${role}` },
+    el("div", { class: "ev-head" },
+      el("span", { class: "ev-role", title: info[1], text: info[0] }),
+      el("button", { class: "link mono ev-where", title: `Open ${ref.path} in the file view`,
+        onclick: () => app.selectFile(ref.path, anchors.find((a) => a.start)?.start ?? res.start ?? null, { fly: false }) },
+      ref.symbol ? `${ref.path.split("/").pop()} › ${ref.symbol}` : ref.path)),
+    el("div", { class: "ev-signals" },
+      statusPill([rcls, rtext + (res.start ? ` L${res.start}–${res.end}` : "")], res.message),
+      anchors.length ? focusPills(anchors) :
+        el("span", { class: "pill st-approx", title: "No focus text: the whole range is cited", text: "no focus" }),
+      [...new Set(anchors.map((a) => a.since_review))].filter(Boolean).map((k) => statusPill(SINCE_REVIEW[k] || ["muted", k])),
+      res.changed_since_review && !anchors.length ? statusPill(["warn", "changed since review"]) : null),
+    ref.note ? el("p", { class: "small", text: ref.note }) : null,
+    anchors.filter((a) => a.status !== "found").map((a) => el("p", { class: "small warn", text: `“${a.text}”: ${a.message}` })),
+    code);
+  if (DISPLAYABLE.has(res.status)) loadExcerpt(app, r.id, ref, res, code, false);
+  else code.append(el("p", { class: "small muted", text: "The cited code cannot be shown: " + (res.message || res.status) }));
+  return card;
+}
+
+/** Lines to show: around each found focus (with context), else the start of the range. */
+function excerptRanges(ref, res, whole) {
+  const found = (ref.anchors || []).filter((a) => a.status === "found");
+  if (whole || !found.length) {
+    const end = whole ? Math.min(res.end, res.start + MAX_EXCERPT - 1) : Math.min(res.end, res.start + 7);
+    return [[res.start, end]];
+  }
+  const spans = found.map((a) => [Math.max(res.start, a.start - CONTEXT), Math.min(res.end, a.end + CONTEXT)])
+    .sort((p, q) => p[0] - q[0]);
+  const out = [];
+  for (const sp of spans) {
+    const last = out[out.length - 1];
+    if (last && sp[0] <= last[1] + 2) last[1] = Math.max(last[1], sp[1]);
+    else out.push([...sp]);
+  }
+  return out;
+}
+
+async function loadExcerpt(app, relId, ref, res, root, whole) {
+  clear(root).append(el("p", { class: "muted small", text: "loading source…" }));
+  const ranges = excerptRanges(ref, res, whole);
+  const lo = ranges[0][0], hi = ranges[ranges.length - 1][1];
+  const data = await app.fetchSource(ref.path, lo, hi).catch((err) => ({ error: true, message: String(err) }));
+  // the user may have selected something else meanwhile: drop this answer
+  if (app.selection?.type !== "relationship" || app.selection.id !== relId || !root.isConnected) return;
+  clear(root);
+  if (data.error) {
+    root.append(el("p", { class: "small warn", text: `Cannot show source: ${data.message || data.error}` }));
+    return;
+  }
+  const lang = languageOf(ref.path);
+  const marks = new Map(); // line -> [from col, to col] of focused text
+  for (const a of (ref.anchors || []).filter((x) => x.status === "found")) {
+    for (let n = a.start; n <= a.end; n++) {
+      const text = data.lines[n - data.start] ?? "";
+      const from = n === a.start ? a.cols[0] : text.length - text.trimStart().length;
+      const to = n === a.end ? a.cols[1] : text.length;
+      marks.set(n, [from, to]);
+    }
+  }
+  // the panel is narrow: drop the indentation all shown lines share
+  const shown = ranges.flatMap(([a, b]) => data.lines.slice(a - data.start, Math.min(b, data.end) - data.start + 1));
+  const indent = Math.min(...shown.filter((t) => t.trim()).map((t) => t.length - t.trimStart().length), 80);
+  const table = el("div", { class: "fc ev-fc" });
+  ranges.forEach(([a, b], k) => {
+    if (k) table.append(el("div", { class: "fc-gap", text: `⋯ lines ${ranges[k - 1][1] + 1}–${a - 1}` }));
+    for (let n = a; n <= Math.min(b, data.end); n++) {
+      const line = (data.lines[n - data.start] ?? "").slice(indent);
+      const mark = marks.get(n)?.map((c) => Math.max(0, c - indent));
+      table.append(el("div", { class: "fc-ln" + (mark ? " focus" : "") },
+        el("span", { class: "fc-no", text: String(n) }),
+        el("span", { class: "fc-tx" }, highlighted(line, lang, mark))));
+    }
+  });
+  root.append(table);
+  const span = `${ref.symbol || ref.path} · L${res.start}–${res.end}`;
+  const total = res.end - res.start + 1;
+  root.append(el("div", { class: "ev-actions" },
+    whole ? el("button", { class: "link small", onclick: () => loadExcerpt(app, relId, ref, res, root, false) }, "Show only the focused lines") :
+      total > hi - lo + 1 ? el("button", { class: "link small", title: "Show the whole cited range for context; the highlight stays what was cited",
+        onclick: () => loadExcerpt(app, relId, ref, res, root, true) }, `Show all of ${span}`) : null,
+    whole && total > MAX_EXCERPT ? el("span", { class: "muted small", text: ` (first ${MAX_EXCERPT} lines)` }) : null,
+    el("button", { class: "link small", title: "Open the file view at this line",
+      onclick: () => app.selectFile(ref.path, [...marks.keys()][0] ?? res.start, { fly: false }) }, "Open in file view")));
+}
+
+/** A line's tokens, with the columns [from, to) wrapped in a mark. */
+function highlighted(line, lang, mark) {
+  const out = [];
+  let col = 0;
+  for (const [cls, t] of tokenize(line, lang)) {
+    const pieces = mark ? splitAt(t, col, mark) : [[t, false]];
+    for (const [text, on] of pieces) {
+      if (!text) continue;
+      const node = cls ? el("span", { class: "t" + cls, text }) : document.createTextNode(text);
+      out.push(on ? el("mark", { class: "ev-mark" }, node) : node);
+    }
+    col += t.length;
+  }
+  return out;
+}
+
+function splitAt(text, col, [from, to]) {
+  const a = Math.max(0, Math.min(text.length, from - col));
+  const b = Math.max(0, Math.min(text.length, to - col));
+  return [[text.slice(0, a), false], [text.slice(a, b), true], [text.slice(b), false]];
+}
+
+/** The selection is gone (renamed or removed in the map since): say so, offer a way on. */
+function missingRecord(app, what, id) {
+  return el("div", { class: "insp" },
+    backButton(app),
+    el("div", { class: "insp-kind", text: "NO LONGER IN THE MAP" }),
+    el("h2", { text: id }),
+    el("p", { text: `The ${what} '${id}' was selected or linked, but the map has no ${what} with this id now: it was renamed or removed. Ids are meant to stay stable; if it was renamed, its new id may be in the map's history.` }),
+    el("p", { class: "small muted" }, "Search with ", el("kbd", { text: "/" }), " or pick it from the Outline or Lines tab."));
+}
+
+function backButton(app) {
+  const prev = app.selHistory[app.selHistory.length - 1];
+  if (!prev) return null;
+  const label = prev.type === "node" ? app.nodeById.get(prev.id)?.label :
+    prev.type === "relationship" ? relText(app.relById.get(prev.id) || { type: "relationship" }) :
+      prev.type === "file" ? prev.path.split("/").pop() : "previous selection";
+  return el("button", { class: "link small insp-back", title: "Back to the previous selection ([)", onclick: () => app.selectBack() },
+    `‹ ${label || "back"}`);
 }
 
 function renderBundle(app, ids) {
   const rels = ids.map((id) => app.relById.get(id)).filter(Boolean);
   const label = (x) => app.nodeById.get(x)?.label || x;
   return el("div", { class: "insp" },
+    backButton(app),
     el("div", { class: "insp-kind", text: "CONNECTION BUNDLE" }),
     el("h2", { text: `${rels.length} relationships share this line` }),
     el("p", { class: "small muted", text: "Relationships between items inside the same two regions are routed together. Zoom in to see where each one goes, or pick one:" }),
     el("ul", {}, rels.map((r) => el("li", {},
       el("span", { class: `cat rel-${r.type}`, text: relText(r) }), " ",
+      r.leg ? el("span", { class: "pill leg", text: r.leg }) : null, " ",
       el("button", { class: "link", onclick: () => app.select({ type: "relationship", id: r.id }) },
         `${label(r.from)} → ${label(r.to)}`),
       r.label ? el("span", { class: "muted small", text: ` — ${r.label}` }) : null))));
@@ -409,8 +664,8 @@ export function computeImpact(app, id) {
       // who is affected when target changes: whoever depends on it or starts it (the
       // `from` of control and dependency lines), and whoever receives its data
       const edges = [
-        ...(app.incoming.get(target) || []).filter((r) => r.type !== "data").map((r) => [r, r.from]),
-        ...(app.outgoing.get(target) || []).filter((r) => r.type === "data").map((r) => [r, r.to]),
+        ...(app.incoming.get(target) || []).filter((r) => r.type !== "data" && r.type !== "error").map((r) => [r, r.from]),
+        ...(app.outgoing.get(target) || []).filter((r) => r.type === "data" || r.type === "error").map((r) => [r, r.to]),
       ];
       for (const [r, other] of edges) {
         considered++;
@@ -446,7 +701,7 @@ export function renderOutline(app, root) {
           title: n.summary || n.label,
           onclick: () => app.select({ type: "node", id }, { fly: true }),
         }, el("span", { class: "tree-kind", text: kindLabel(n.kind) }), n.label,
-        n.evidence && n.evidence !== "observed" && n.evidence !== "inferred" ? el("span", { class: `pill ev-${n.evidence}`, text: EVIDENCE_LABEL[n.evidence] }) : null),
+        n.certainty && n.certainty !== "observed" && n.certainty !== "inferred" ? el("span", { class: `pill ev-${n.certainty}`, text: EVIDENCE_LABEL[n.certainty] }) : null),
         sub.childNodes.length ? sub : null);
       parentUl.append(li);
     }
@@ -528,6 +783,51 @@ export function renderFiles(app, root) {
     el("p", { class: "small muted", text: "A file belongs to exactly one area of the map, and all of its code is shown inside that area; nodes elsewhere may cite it as evidence. ◐ marks files split between areas." }));
 }
 
+/**
+ * Every relationship as a list: exchanges first (with their legs), then the other lines by
+ * type. The keyboard and screen-reader route to what the map draws, including lines whose
+ * labels do not fit at the current zoom. Selecting one keeps the camera where it is.
+ */
+export function renderConnections(app, root) {
+  clear(root);
+  const filter = el("input", { type: "search", class: "outline-filter", placeholder: "Filter connections…", "aria-label": "Filter connections" });
+  const list = el("div", { class: "conn-list" });
+  const label = (x) => app.nodeById.get(x)?.label || x;
+  const selected = app.selection?.type === "relationship" ? app.selection.id : null;
+  const hasSite = (r) => (r.refs || []).some((x) => x.role === "transfer" || x.role === "receive");
+  const item = (r) => el("li", {},
+    el("button", { class: "conn-item" + (r.id === selected ? " selected" : ""), dataset: { id: r.id },
+      title: `${label(r.from)} → ${label(r.to)}`, onclick: () => app.select({ type: "relationship", id: r.id }) },
+    r.leg ? el("span", { class: "pill leg", text: r.leg }) : el("span", { class: `cat rel-${r.type}`, text: r.type }), " ",
+    el("span", { class: "conn-label", text: relText(r) }),
+    el("span", { class: "muted small", text: ` ${label(r.from)} → ${label(r.to)}` }),
+    r.certainty && r.certainty !== "observed" ? el("span", { class: `pill ev-${r.certainty}`, text: EVIDENCE_LABEL[r.certainty] }) : null,
+    (r.type === "data" || r.type === "error") && !hasSite(r) ? el("span", { class: "pill muted", title: "No handed-over or taken-in site is cited", text: "no site" }) : null));
+  const build = (q) => {
+    clear(list);
+    const match = (r) => !q || [relText(r), r.id, r.exchange || "", label(r.from), label(r.to)].some((t) => t.toLowerCase().includes(q));
+    const inExchange = new Set();
+    const xs = (app.model.exchanges || []).map((x) => {
+      const legs = x.legs.map((l) => app.relById.get(l)).filter(Boolean);
+      legs.forEach((r) => inExchange.add(r.id));
+      return { x, legs: legs.filter(match) };
+    }).filter((e) => e.legs.length);
+    if (xs.length) {
+      list.append(el("h3", { text: `Exchanges (${xs.length})` }), el("ul", { class: "conn-x" }, xs.map(({ x, legs }) =>
+        el("li", {}, el("div", { class: "small" }, el("strong", { text: label(x.caller) }), " ⇄ ", el("strong", { text: label(x.callee) })),
+          el("ul", {}, legs.map(item))))));
+    }
+    for (const t of REL_TYPES) {
+      const rels = app.model.relationships.filter((r) => r.type === t.type && !inExchange.has(r.id) && match(r));
+      if (rels.length) list.append(el("h3", { text: `${t.label} (${rels.length})` }), el("ul", {}, rels.map(item)));
+    }
+    if (!list.childNodes.length) list.append(el("p", { class: "muted small", text: "No matching connections." }));
+  };
+  build("");
+  filter.addEventListener("input", () => build(filter.value.trim().toLowerCase()));
+  root.append(filter, el("p", { class: "small muted", text: "Every line of the map. An exchange is a request and what comes back, inspected together." }), list);
+}
+
 export function renderFlows(app, root) {
   clear(root);
   if (!app.model.flows.length) {
@@ -541,7 +841,7 @@ export function renderFlows(app, root) {
         el("button", { class: "btn" + (active ? " primary" : ""), "aria-expanded": active ? "true" : "false",
           title: active ? "Close this flow (Esc)" : "Show this flow's steps on the map",
           onclick: () => (active ? app.setFlow(null) : app.setFlow(f.id, 0)) }, active ? "✕ Close" : "Show"),
-        el("strong", { text: f.label }), " ", f.evidence ? evidenceBadge(f.evidence) : null),
+        el("strong", { text: f.label }), " ", f.certainty ? certaintyBadge(f.certainty) : null),
       f.summary ? el("p", { class: "small", text: f.summary }) : null);
     if (active) {
       const ol = el("ol", { class: "steps" });
@@ -614,7 +914,7 @@ export function renderMapLegend(app, root) {
     el("span", { class: "lg-name", text: name }), el("span", { class: "lg-text", text }));
   const rows = REL_TYPES.filter((t) => used.has(t.type) && !app.hiddenRelTypes.has(t.type))
     .map((t) => row(`lg-${t.type}`, t.label, t.arrow));
-  rows.push(row("lg-uncertain", "dotted", "not confirmed in source"));
+  if (app.uncertainty) rows.push(row("lg-uncertain", "dotted", "not confirmed in source"));
   if (app.flow) {
     rows.push(row("lg-flow", "flow", "steps on the relationships they use"));
     rows.push(row("lg-fail", "failure", "failure or compensation step"));
@@ -673,7 +973,8 @@ function renderLegend(app) {
       el("li", {}, el("span", { class: "sw sw-long" }), "long dashes: planned (not implemented)"),
       el("li", {}, el("span", { class: "sw sw-double" }), "double border: outside the repository"),
       el("li", {}, el("span", { class: "sw sw-band" }), "thicker line with ×n: n relationships share this route; zoom in to see where each goes"),
-      el("li", {}, el("span", { class: "sw sw-dotline" }), "dotted line: relationship not confirmed in source"),
+      el("li", {}, el("span", { class: "sw sw-errline" }), "red dashed line: a failure or reported problem, from where it is raised or found to where it is handled"),
+      el("li", {}, el("span", { class: "sw sw-dotline" }), "dotted line (with uncertainty highlighted): relationship not confirmed in source"),
       el("li", {}, el("span", { class: "sw sw-flow" }), "numbered steps, drawn on the relationships they use: open flow; dashed red with ✕/↺: failure or compensation")));
 }
 
@@ -687,8 +988,8 @@ export function renderCoverage(app, root) {
   const byStatus = new Map();
   for (const [, r] of refs) byStatus.set(r.status, (byStatus.get(r.status) || 0) + 1);
   const unsupported = app.model.nodes.filter((n) => !n.synthetic && !(n.refs || []).length && !n.children.length &&
-    !["planned", "unknown"].includes(n.evidence) && !["external", "actor"].includes(n.kind));
-  const uncertain = app.model.nodes.filter((n) => ["needs_review", "unknown", "planned"].includes(n.evidence));
+    !["planned", "unknown"].includes(n.certainty) && !["external", "actor"].includes(n.kind));
+  const uncertain = app.model.nodes.filter((n) => ["needs_review", "unknown", "planned"].includes(n.certainty));
   const changed = d.git?.reviewed?.known ? app.model.nodes.filter((n) => (n.refs || []).some((r) => d.refs[r.key]?.changed_since_review)) : [];
 
   const diagList = (list) => el("ul", { class: "diags" }, list.slice(0, 200).map((x) => el("li", { class: `diag ${x.severity}` },
@@ -700,6 +1001,15 @@ export function renderCoverage(app, root) {
 
   const nodeList = (list) => el("ul", {}, list.slice(0, 100).map((n) => el("li", {}, nodeLink(app, n.id))));
   const cov = d.coverage;
+  const dataRels = app.model.relationships.filter((r) => r.type === "data" || r.type === "error");
+  const sited = dataRels.filter((r) => (r.refs || []).some((x) => (x.role === "transfer" || x.role === "receive") &&
+    (x.anchors || []).some((a) => a.status === "found")));
+  const unsited = dataRels.filter((r) => !sited.includes(r));
+  const brokenFocus = app.model.relationships.filter((r) => (r.refs || []).some((x) => (x.anchors || []).some((a) => a.status !== "found")));
+  const units = d.ownership?.units;
+  const relList = (list) => el("ul", {}, list.slice(0, 100).map((r) => el("li", {},
+    el("button", { class: "link", onclick: () => app.select({ type: "relationship", id: r.id }) }, `${relText(r)}`),
+    el("span", { class: "muted small", text: ` ${relSummaryLine(app, r)}` }))));
   root.append(el("div", {},
     el("h3", { text: "Map health" }),
     el("p", {}, el("strong", { text: plural(errors.length, "error") }), ", ", plural(warnings.length, "warning"),
@@ -717,13 +1027,25 @@ export function renderCoverage(app, root) {
         el("p", { class: "small warn", text: `Reviewed revision ${d.git.reviewed.revision} is unknown to git.` }),
       changed.length ? nodeList(changed) : el("p", { class: "small muted", text: "None." })) :
       el("p", { class: "small muted", text: "The map does not record scope.reviewed_revision, so staleness cannot be tracked." }),
+    el("h3", { text: "Data lines grounded in code" }),
+    el("p", { class: "small", text: `${sited.length} of ${plural(dataRels.length, "data or error relationship")} cite a site where the data is handed over or taken in, with its focus text found.` }),
+    unsited.length ? el("details", {}, el("summary", { text: `Without a found site (${unsited.length})` }), relList(unsited)) : null,
+    brokenFocus.length ? el("div", {}, el("p", { class: "small warn", text: `${plural(brokenFocus.length, "relationship")} with focus text that was not found exactly once:` }), relList(brokenFocus)) : null,
+    units ? el("div", {},
+      el("h3", { text: "Code accounted for" }),
+      el("p", { class: "small", text: `Python definitions in owned files: ${units.counts.mapped} cited by a node, ${units.counts.coarse} only inside a broader ref (class or whole file), ${units.counts.unmapped} shown by no node. This counts where code is shown, not whether it is explained well.` }),
+      units.coarse.length ? el("details", {}, el("summary", { text: `Broad refs (${units.coarse.length})` }), el("ul", {}, units.coarse.map((c) => el("li", {},
+        nodeLink(app, c.node), el("span", { class: "muted small", text: ` ${c.ref}: ${plural(c.members.length, "definition")}` }),
+        c.new.length ? el("span", { class: "pill warn", text: `${c.new.length} new since review` }) : null)))) : null,
+      !units.baseline ? el("p", { class: "small muted", text: "No reviewed revision: code added inside broad refs since the map was written cannot be told apart." }) : null,
+      units.without_inventory.length ? el("p", { class: "small muted", text: `${plural(units.without_inventory.length, "file")} without a definition inventory (no parser for the language): ${units.without_inventory.slice(0, 5).join(", ")}${units.without_inventory.length > 5 ? "…" : ""}. Only line coverage is checked there.` }) : null) : null,
     el("h3", { text: "Claims without evidence" }),
     unsupported.length ? nodeList(unsupported) : el("p", { class: "small muted", text: "Every leaf claim has a source reference or an explicit status." }),
     el("h3", { text: "Marked uncertain" }),
     uncertain.length ? nodeList(uncertain) : el("p", { class: "small muted", text: "None." }),
     cov && app.files.counts ? el("div", {},
       el("h3", { text: "Files with an owner" }),
-      el("p", { class: "small", text: `${app.files.counts.owned_required} of ${plural(app.files.counts.required, "code file")} belong to a part of the map${cov.truncated ? " (file list truncated)" : ""}. Tests, docs, tooling and ignored files need no owner.` }),
+      el("p", { class: "small", text: `${app.files.counts.owned_required} of ${plural(app.files.counts.required, "code file")} belong to a part of the map${cov.truncated ? " (file list truncated)" : ""}. ${plural(app.files.counts.files - app.files.counts.required, "other file")} (tests, docs, tooling, non-code and ignored files) need no owner.` }),
       app.files.unowned.length ? el("ul", { class: "owned" }, app.files.unowned.slice(0, 100).map((p) => el("li", {}, fileLink(app, p)))) : null,
       el("table", { class: "cov" }, el("tbody", {}, cov.by_dir.map((r) => el("tr", {},
         el("td", { class: "mono small", text: r.dir }),

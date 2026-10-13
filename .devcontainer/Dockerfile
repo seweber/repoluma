@@ -10,6 +10,9 @@ ARG JUST_VERSION
 
 USER root
 
+# The lib* packages and fonts are what headless Chromium needs (browser tests, bench/);
+# the browser itself comes from the locked playwright version, installed by
+# post-create.sh. Noto Sans is the UI font the layout measurements in docs/ were taken with.
 RUN apt-get update \
     && DEBIAN_FRONTEND=noninteractive apt-get install -y --no-install-recommends \
         build-essential \
@@ -19,6 +22,11 @@ RUN apt-get update \
         ripgrep \
         shellcheck \
         gh \
+        libnspr4 libnss3 libatk1.0-0t64 libatk-bridge2.0-0t64 libatspi2.0-0t64 \
+        libcups2t64 libdbus-1-3 libasound2t64 libgbm1 libxkbcommon0 \
+        libx11-6 libxcb1 libxext6 libxcomposite1 libxdamage1 libxfixes3 libxrandr2 \
+        libcairo2 libpango-1.0-0 \
+        fonts-noto-core fonts-dejavu-core \
     && rm -rf /var/lib/apt/lists/*
 
 COPY --from=uv /uv /uvx /usr/local/bin/

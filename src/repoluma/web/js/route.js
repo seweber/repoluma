@@ -31,6 +31,11 @@ export const quant = (v) => Math.round(v * QS) / QS;
 const EPS = 1e-6;
 const SATURATED = 400; // lines in one region beyond which crossings are no longer priced
 const PORT_SEP = 1.6; // spacing of line ends on a box side, relative to sep
+// a pair (an exchange's request and answer) is drawn as two lanes this far either side of
+// its route, relative to sep; the router keeps that much more room around it. Between the
+// top-level regions (outside all boxes) the lanes are wider, and the same for every pair.
+export const LANE_SEP = 0.3;
+export const LANE_SEP_OUTSIDE = 0.6;
 const BUSY = 100; // lines in one region beyond which ways out are not split by the lines they cross
 
 /** Distance kept from a box's corners when a line attaches to its side. */
@@ -62,6 +67,7 @@ export class Level {
     // the region's own top edge can be crossed beside its title
     this.top = titleEnd === undefined ? null : [titleEnd + this.clear, this.frame.w - this.clear];
     this.sep = this.gap * 0.2; // minimum distance between parallel lines
+    this.laneSep = LANE_SEP; // a pair's lanes either side of its route, in sep (layout sets it)
     this.bendCost = this.gap * 1.5;
     this.crossCost = this.bendCost * 2 + this.gap; // above the two bends that pass a line instead
     const { cols, rows, colX, colW, rowY, rowH } = grid;
@@ -393,9 +399,18 @@ export class Level {
     // claimed spots are respected by every candidate; only if no path can respect them
     // is a line allowed to share a spot (last resort, so that it is still drawn)
     // the strict pass cannot succeed when every option at one end is fully claimed
+    // A pair first wants room for its lanes; where a side is too crowded for that, it takes
+    // the room of a single line (its lanes then narrow) before it may share a spot.
+    const wide = ctx.wide;
     const room = (O) => ctx.freeOn([O], O.lo, O.hi).free.length > 0;
-    const passes = Ps.some(room) && Qs.some(room) ? [true, false] : [false];
-    for (const strict of passes) {
+    const passes = [];
+    for (const w of wide ? [wide, 0] : [0]) {
+      ctx.wide = w;
+      if (Ps.some(room) && Qs.some(room)) passes.push([true, w]);
+    }
+    passes.push([false, 0]);
+    for (const [strict, w] of passes) {
+      ctx.wide = w;
       const pick = (opts, range, want) => ctx.pick(opts, range, want, strict);
       const spots = (opts, range, want) => ctx.spots(opts, range, want, strict);
       // option pairs in order of a lower bound on their cost (branch and bound)
@@ -442,6 +457,7 @@ export class Level {
       }
       if (best) break;
     }
+    ctx.wide = wide;
     return best;
   }
 
@@ -567,7 +583,7 @@ export class Level {
           const forward = p[i + 1][k] >= p[i][k];
           const tStart = turnAt(p[i - 1]), tEnd = turnAt(p[i + 2]);
           list.push({ pi, i, coord, lo, hi, min: Math.min(min, coord), max: Math.max(max, coord), pinned,
-            tLo: forward ? tStart : tEnd, tHi: forward ? tEnd : tStart });
+            tLo: forward ? tStart : tEnd, tHi: forward ? tEnd : tStart, half: pc.pair ? this.laneSep * sep : 0 });
         }
       });
       // 1. the order across: by coordinate, except that pieces close together (within
@@ -621,21 +637,29 @@ export class Level {
           pair(active[k - 1], active[k]);
         }
       }
-      // least movement satisfying the constraints within each piece's bounds (projection)
-      for (const x of list) x.want = x.coord;
-      for (let it = 0; it < 60; it++) {
+      // least movement satisfying the constraints within each piece's bounds (projection).
+      // A pair's lanes want room beyond sep; where that does not fit (pieces held between box
+      // sides), a half-met attempt can leave lines closer than plain sep would: then space
+      // by sep alone, and the renderer narrows the lanes of the pairs that lack room.
+      const project = (lanes) => {
+        for (const x of list) x.want = x.coord;
         let worst = 0;
-        for (const [s, t] of cons) {
-          const deficit = s.want + sep - t.want;
-          if (deficit <= EPS) continue;
-          worst = Math.max(worst, deficit);
-          const ws = s.pinned ? 0 : 1, wt = t.pinned ? 0 : 1;
-          if (!ws && !wt) continue;
-          s.want = Math.max(s.min, s.want - (deficit * ws) / (ws + wt));
-          t.want = Math.min(t.max, t.want + (deficit * wt) / (ws + wt));
+        for (let it = 0; it < 60; it++) {
+          worst = 0;
+          for (const [s, t] of cons) {
+            const deficit = s.want + sep + (lanes ? s.half + t.half : 0) - t.want;
+            if (deficit <= EPS) continue;
+            const ws = s.pinned ? 0 : 1, wt = t.pinned ? 0 : 1;
+            if (!ws && !wt) continue;
+            worst = Math.max(worst, deficit);
+            s.want = Math.max(s.min, s.want - (deficit * ws) / (ws + wt));
+            t.want = Math.min(t.max, t.want + (deficit * wt) / (ws + wt));
+          }
+          if (worst < EPS) break;
         }
-        if (worst < EPS) break;
-      }
+        return worst < EPS;
+      };
+      if (!project(true) && list.some((x) => x.half)) project(false);
       for (const s of list) {
         const v = quant(s.want);
         if (Math.abs(v - s.coord) < EPS) continue;
@@ -688,6 +712,7 @@ class Claims {
     this.optKeys = new WeakMap(); // option -> its part of a cache key
     this.cache = new Map(); // sides and range -> free intervals
     this.cachedBySide = new Map(); // side key -> [cache keys that read it]; dropped when it is claimed
+    this.wide = 0; // 1 while a pair is routed: it needs room for its lanes (level.laneSep)
   }
 
   count(level) {
@@ -782,12 +807,21 @@ class Claims {
    * change on commit, so this is computed once per side and range until then.
    */
   freeOn(opts, lo, hi) {
-    const key = (opts.length === 1 ? this.optKey(opts[0]) : opts.map((O) => this.optKey(O)).join("/")) + `@${lo},${hi}`;
+    const key = (opts.length === 1 ? this.optKey(opts[0]) : opts.map((O) => this.optKey(O)).join("/")) +
+      `@${lo},${hi}${this.wide ? "w" : ""}`;
     const hit = this.cache.get(key);
     if (hit) return hit;
     // all options of one connection belong to one level; line ends on a box keep more
     // room than lines in a channel, so that their arrowheads stay apart
-    const sep = opts[0].level.sep * (opts.some((O) => O.item !== undefined) ? PORT_SEP : 1);
+    // (a pair's lanes reach LANE_SEP·sep beyond its centre: a pair needs that much more room)
+    let sep = opts[0].level.sep * ((opts.some((O) => O.item !== undefined) ? PORT_SEP : 1) +
+      this.wide * opts[0].level.laneSep);
+    // the border of a top-level region is also crossed outside it, where lines (and a pair's
+    // wider lanes) need the room of the top level: keep the larger of the two
+    for (const O of opts) {
+      const out = O.border && O.level.outside;
+      if (out) sep = Math.max(sep, (out.sep * (1 + this.wide * out.laneSep)) / O.level.world.scale);
+    }
     const taken = [];
     for (const O of opts) {
       // claims are kept sorted in world units: look only at the window around the range
@@ -840,12 +874,17 @@ class Claims {
       }
     }
     const claims = [];
+    // a pair claims its two lanes as well as its centre, so others keep sep from each lane
+    const lanes = owner?.pair ? [0, -level.laneSep * level.sep, level.laneSep * level.sep] : [0];
     for (const [O, c] of [[r.P, r.cP], [r.Q, r.cQ]]) {
       for (const k of this.keys(O)) {
         if (!this.sides.has(k)) this.sides.set(k, []);
-        const list = this.sides.get(k), v = this.toWorld(O, c);
-        list.splice(lowerBound(list, v), 0, v);
-        claims.push([k, v]);
+        const list = this.sides.get(k);
+        for (const d of lanes) {
+          const v = this.toWorld(O, c + d);
+          list.splice(lowerBound(list, v), 0, v);
+          claims.push([k, v]);
+        }
         this.invalidate(k);
       }
     }
@@ -907,13 +946,27 @@ function adjust(pts, P, a, Q, b) {
  */
 export function routeNets(L, nets, opts = {}) {
   const box = (id) => (id === null ? L.root : L.boxes.get(id));
-  // connections with identical endpoints share a line
+  // connections with identical endpoints share a line; errors get one of their own, so a
+  // result and the error that may come back instead are told apart. The input and the
+  // result (or response) of one exchange are routed once, from caller to callee, and drawn
+  // as two lanes of that route, so a request and its answer always run side by side.
   const groups = new Map();
   for (const net of nets) {
     if (net.from === net.to || !L.ancestors.get(net.from) || !L.ancestors.get(net.to)) continue;
-    const key = net.from + "\u0000" + net.to;
-    if (!groups.has(key)) groups.set(key, { from: net.from, to: net.to, members: [] });
+    const r = net.rel;
+    const lane = r?.exchange && r.type !== "error" && (r.leg === "input" || r.leg === "result" || r.leg === "response");
+    const [from, to] = lane && r.leg !== "input" ? [net.to, net.from] : [net.from, net.to];
+    const key = lane ? `pair\u0000${r.exchange}\u0000${from}\u0000${to}` :
+      net.from + "\u0000" + net.to + (r?.type === "error" ? "\u0000error" : "");
+    if (!groups.has(key)) groups.set(key, { from, to, members: [], pair: lane });
     groups.get(key).members.push(net);
+  }
+  // an exchange with only one leg drawn is an ordinary line
+  for (const g of groups.values()) {
+    if (g.pair && !(g.members.some((m) => m.from === g.from) && g.members.some((m) => m.from === g.to))) {
+      g.pair = false;
+      if (g.members[0].from !== g.from) [g.from, g.to] = [g.to, g.from];
+    }
   }
   const ordered = [...groups.values()].sort((a, b) => b.members.length - a.members.length ||
     a.from.localeCompare(b.from) || a.to.localeCompare(b.to));
@@ -960,9 +1013,11 @@ export function routeNets(L, nets, opts = {}) {
             expand: (c) => [...r.io.expand(r.at(c)), { level: lvl, pts: r.pts(c), P: r.io, Q: border }] });
         }
       }
-      if (ranges.length) continue;
-      // otherwise the cheapest path of any shape; its last piece can still slide along the
-      // border as far as the free space allows, so the outside chooses where it crosses
+      // where straight and L ways out exist and some of their border positions are free, they
+      // are enough; otherwise (none, or all taken: a crowded border) also the cheapest path of
+      // any shape, which may bend to reach a free position; its last piece can still slide
+      // along the border as far as the free space allows, so the outside chooses where it crosses
+      if (ranges.length && ranges.some((x) => ctx.freeOn([border], Math.min(x.lo, x.hi), Math.max(x.lo, x.hi)).free.length)) continue;
       const r = lvl.connect(inner, [border], ctx);
       if (!r) continue;
       const [lo, hi] = lvl.slideRange(r.pts, border, r.cQ, r.P.item);
@@ -1097,7 +1152,9 @@ export function routeNets(L, nets, opts = {}) {
     let k = 0;
     while (k < ca.length && k < cb.length && ca[k] === cb[k]) k++;
     const C = box(k === 0 ? null : ca[k - 1]);
+    ctx.wide = g.pair ? 1 : 0; // a pair needs room for both lanes
     const r = C.level.connect(endOptions(C, ca, k), endOptions(C, cb, k), ctx);
+    ctx.wide = 0;
     if (!r) return null;
     const src = r.P.expand(r.cP);
     const dst = r.Q.expand(r.cQ).reverse().map((pc) => ({ level: pc.level, pts: pc.pts.slice().reverse(), P: pc.Q, Q: pc.P }));
@@ -1147,7 +1204,7 @@ export function routeNets(L, nets, opts = {}) {
     todo = [...next];
   }
   const segments = [];
-  for (const g of ordered) for (const pc of g.pieces || []) segments.push({ ...pc, members: g.members });
+  for (const g of ordered) for (const pc of g.pieces || []) segments.push({ ...pc, members: g.members, pair: g.pair });
 
   // order and space parallel pieces, region by region
   const byLevel = new Map();
@@ -1162,14 +1219,21 @@ export function routeNets(L, nets, opts = {}) {
     const w = lvl.world;
     const item = (O) => (O.border || O.item === undefined ? null : lvl.rects[O.item].id);
     const dstItem = item(s.Q);
+    const srcItem = item(s.P);
     return {
       container: lvl.id,
       depth: lvl.depth + 1, // depth of the items this piece connects
       points: s.pts.map(([x, y]) => [w.x + x * w.scale, w.y + y * w.scale]),
       members: s.members,
-      srcItem: item(s.P),
+      srcItem,
       dstItem,
       terminal: dstItem !== null && s.members.some((m) => m.to === dstItem),
+      // a pair: points run from caller to callee; the answer lane ends at the source side
+      pair: !!s.pair,
+      sep: lvl.sep * w.scale, // minimum distance between parallel lines here (world units)
+      laneSep: lvl.laneSep,
+      outside: lvl.id === null, // between the top-level regions
+      terminalSrc: srcItem !== null && s.members.some((m) => m.to === srcItem),
     };
   });
 }

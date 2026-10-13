@@ -56,4 +56,10 @@ mkdir -p "$CLAUDE_DIR/skills/herdr"
 herdr integration install claude
 herdr --skill > "$CLAUDE_DIR/skills/herdr/SKILL.md"
 
+# Chromium for the browser tests and bench/, matching the locked playwright version.
+# Cached in the persistent volume (PLAYWRIGHT_BROWSERS_PATH), so this is a no-op after the
+# first run unless the pin changes. Failure is not fatal: those tests then skip.
+uv run --frozen playwright install chromium \
+  || echo "warning: Chromium download failed; browser tests will be skipped" >&2
+
 uv sync --locked
