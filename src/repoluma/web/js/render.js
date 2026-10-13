@@ -31,6 +31,7 @@ const TYPE_STYLE = {
   control: { width: 0.9, alpha: 0.7 },
   dependency: { width: 0.7, alpha: 0.55 },
 };
+const NOTE_MARGIN = 8; // px of free line kept on each side of a line's label
 const LANE_MAX = 3; // px between a pair's route and each lane, at most (closer when zoomed out)
 const LANE_MAX_OUTSIDE = 6; // the same between the top-level regions, where lanes are wider
 const LANE_GAP = 6; // px a lane keeps clear of a neighbouring line (less when zoomed out: sep)
@@ -657,24 +658,44 @@ export class Renderer {
     const order = [...lines.values()].sort((a, b) => a.rank - b.rank);
     for (const { pieces } of order) {
       pieces.sort((a, b) => longestRun(b.d.pts) - longestRun(a.d.pts));
-      for (const n of pieces) {
-        const { d } = n;
-        ctx.font = n.badge ? `700 11px ${SANS}` : `11px ${SANS}`;
-        const text = n.text && fitText(ctx, n.text, 260);
-        const size = n.badge ? [ctx.measureText(n.badge).width + 10, 18] : [ctx.measureText(text).width + 8, 16];
-        const spot = annotationSpot(d.pts, n.crossings, size, this.noteRects, n.blocked);
-        if (!spot) continue;
-        ctx.save();
-        ctx.globalAlpha = d.alpha;
-        const emphasis = d.isRel ? this.theme.sel : d.isHover || d.isPair ? d.color : null;
-        if (n.badge) badge(ctx, spot[0], spot[1], n.badge, d.color, this.theme.bg);
-        else label(ctx, spot[0], spot[1], text, this.theme, emphasis);
-        ctx.restore();
-        this.noted.push(d.members.map((m) => m.id).join(","));
-        // the annotation is a click target for its line (slightly larger than drawn)
-        this.labelHits.push({ x0: spot[0] - size[0] / 2 - 3, y0: spot[1] - size[1] / 2 - 3,
-          x1: spot[0] + size[0] / 2 + 3, y1: spot[1] + size[1] / 2 + 3, members: d.members, pts: d.pts });
-        break;
+      // text runs along its line, never across it: on a horizontal stretch of any piece if
+      // one is long enough, else turned to read up a vertical one; a line with neither is not
+      // labelled (hovering it and the Lines tab name it). A bundle badge sits upright on either
+      const modes = pieces[0].badge ? ["upright"] : ["horizontal", "vertical"];
+      // where the full text fits nowhere, a shortened one (with an ellipsis) on the longest
+      // stretch, as long as enough of it is left to be recognised
+      const room = Math.max(...pieces.map((n) => longestRun(n.d.pts))) - 2 * NOTE_MARGIN - 8;
+      const widths = pieces[0].badge ? [260] : [260, room];
+      let placed = false;
+      for (const maxW of widths) for (const mode of modes) {
+        if (placed) break;
+        for (const n of pieces) {
+          const { d } = n;
+          ctx.font = n.badge ? `700 11px ${SANS}` : `11px ${SANS}`;
+          const text = n.text && fitText(ctx, n.text, maxW);
+          if (n.text && (!text || (text !== n.text && text.length < 7))) continue; // too little left
+          const size = n.badge ? [ctx.measureText(n.badge).width + 10, 18] : [ctx.measureText(text).width + 8, 16];
+          const spot = annotationSpot(d.pts, n.crossings, size, this.noteRects, n.blocked, mode);
+          if (!spot) continue;
+          const [x, y, turned] = spot;
+          ctx.save();
+          ctx.globalAlpha = d.alpha;
+          const emphasis = d.isRel ? this.theme.sel : d.isHover || d.isPair ? d.color : null;
+          if (n.badge) badge(ctx, x, y, n.badge, d.color, this.theme.bg);
+          else if (turned) {
+            ctx.translate(x, y);
+            ctx.rotate(-Math.PI / 2); // reads from bottom to top
+            label(ctx, 0, 0, text, this.theme, emphasis);
+          } else label(ctx, x, y, text, this.theme, emphasis);
+          ctx.restore();
+          this.noted.push(d.members.map((m) => m.id).join(","));
+          // the annotation is a click target for its line (slightly larger than drawn)
+          const [hw, hh] = turned ? [size[1] / 2, size[0] / 2] : [size[0] / 2, size[1] / 2];
+          this.labelHits.push({ x0: x - hw - 3, y0: y - hh - 3, x1: x + hw + 3, y1: y + hh + 3,
+            members: d.members, pts: d.pts });
+          placed = true;
+          break;
+        }
       }
     }
   }
@@ -1001,7 +1022,7 @@ function longestRun(pts) {
  * straight run that holds it, away from crossings, from `blocked` rects (boxes) and from
  * rects already `taken` (the chosen rect is added). null if there is no such spot.
  */
-function annotationSpot(pts, crossings, [w, h], taken, blocked = []) {
+function annotationSpot(pts, crossings, [w, h], taken, blocked = [], mode = "upright") {
   const runs = [];
   for (let i = 1; i < pts.length; i++) {
     const [a, b] = [pts[i - 1], pts[i]];
@@ -1010,17 +1031,22 @@ function annotationSpot(pts, crossings, [w, h], taken, blocked = []) {
   runs.sort((p, q) => q.len - p.len);
   const pad = 4;
   for (const { a, b, len, horiz } of runs) {
-    const need = (horiz ? w : h) + 24; // the annotation plus room for the line on both sides
+    // "horizontal": text on horizontal runs only; "vertical": text turned along vertical
+    // runs; "upright" (badges): either, never turned
+    if ((mode === "horizontal" && !horiz) || (mode === "vertical" && horiz)) continue;
+    const turned = mode === "vertical";
+    const [rw, rh] = turned ? [h, w] : [w, h]; // the annotation's extent on screen
+    const need = (horiz ? rw : rh) + 2 * NOTE_MARGIN; // the annotation plus some line on both sides
     if (len < need) continue;
     for (const t of [0.5, 0.35, 0.65, 0.2, 0.8]) {
       if (len * Math.min(t, 1 - t) < need / 2) continue;
       const x = a[0] + (b[0] - a[0]) * t, y = a[1] + (b[1] - a[1]) * t;
-      const r = { x0: x - w / 2 - pad, y0: y - h / 2 - pad, x1: x + w / 2 + pad, y1: y + h / 2 + pad };
+      const r = { x0: x - rw / 2 - pad, y0: y - rh / 2 - pad, x1: x + rw / 2 + pad, y1: y + rh / 2 + pad };
       if (crossings.some((c) => c.x > r.x0 - 6 && c.x < r.x1 + 6 && c.y > r.y0 - 6 && c.y < r.y1 + 6)) continue;
       const hits = (q) => q.x0 < r.x1 && r.x0 < q.x1 && q.y0 < r.y1 && r.y0 < q.y1;
       if (taken.some(hits) || blocked.some(hits)) continue;
       taken.push(r);
-      return [x, y];
+      return [x, y, turned];
     }
   }
   return null;

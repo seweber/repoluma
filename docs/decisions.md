@@ -493,7 +493,13 @@ validation diagnostics) is a relationship type of its own, `error`, drawn red an
 on a route of its own:
 first drawn as data, a result and its error leg shared one line marked `×2`, which hid
 both payloads and made the failure look like a normal result. A few data lines sharing a
-route are labelled with each payload instead of `×n`. The dotted style for unconfirmed
+route are labelled with each payload instead of `×n`. Labels lie along their line, never
+across it: on a horizontal stretch if one is long enough, else turned to read up a vertical
+one, else shortened with an ellipsis (at least six characters) on the longest stretch; a line
+with no room for that is left unlabelled (hover and the Lines tab name it). Compared with
+labels allowed across vertical lines, the self-map shows fewer labels at overview zoom
+(20 instead of 38 of its lines at the fitted view, 43 instead of 59 at 2×; about the same
+when zoomed in); the shop shows as many or more. The dotted style for unconfirmed
 lines is drawn (and listed in the legend) only while uncertainty is highlighted, so dashes
 on the map mean failure.
 

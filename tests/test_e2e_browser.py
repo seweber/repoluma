@@ -706,3 +706,21 @@ def test_pairs_between_regions_have_equal_wide_lanes(page):
         if n:
             assert hi - lo < 0.05, (f, lo, hi)
     assert any(n for _, n, _, _ in spreads), "the shop has pairs between its regions"
+
+
+def test_a_label_on_a_vertical_line_is_turned_and_clickable(page):
+    pg, _ = page
+    found = None
+    for f in (1, 1.4, 1.8, 2.5, 3.5):
+        pg.evaluate(f"""(() => {{ const a = window.repoluma; const fit = a.camera.fitState(a.layout.bounds, 0.05, a.insets());
+          a.camera.set({{ ...fit, z: fit.z * {f} }}); }})()""")
+        time.sleep(0.3)
+        found = pg.evaluate("""(() => { const st = document.querySelector('#stage').getBoundingClientRect();
+          const h = window.repoluma.renderer.labelHits.find((h) => h.members.length === 1 && h.y1 - h.y0 > 2 * (h.x1 - h.x0));
+          return h ? [h.members[0].id, st.left + (h.x0 + h.x1) / 2, st.top + (h.y0 + h.y1) / 2] : null; })()""")
+        if found:
+            break
+    assert found, "some label lies along a vertical line"
+    rid, x, y = found
+    pg.mouse.click(x, y)
+    wait(pg, f"window.repoluma.selection?.id === '{rid}'")
